@@ -316,6 +316,7 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import type { TripPlan } from '@/types'
+import { getAttractionPhoto } from '@/services/api'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -364,6 +365,16 @@ const saveChanges = () => {
   editMode.value = false
   // 更新sessionStorage
   if (tripPlan.value) {
+    if (tripPlan.value.budget) {
+      const budget = tripPlan.value.budget
+      budget.total_attractions = tripPlan.value.days.reduce(
+        (sum, day) => sum + day.attractions.reduce(
+          (daySum, attraction) => daySum + (attraction.ticket_price || 0), 0
+        ), 0
+      )
+      budget.total = budget.total_attractions + budget.total_hotels +
+        budget.total_meals + budget.total_transportation
+    }
     sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
   }
   message.success('修改已保存')
@@ -432,11 +443,10 @@ const loadAttractionPhotos = async () => {
 
   tripPlan.value.days.forEach(day => {
     day.attractions.forEach(attraction => {
-      const promise = fetch(`http://localhost:8000/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && data.data.photo_url) {
-            attractionPhotos.value[attraction.name] = data.data.photo_url
+      const promise = getAttractionPhoto(attraction.name)
+        .then(url => {
+          if (url) {
+            attractionPhotos.value[attraction.name] = url
           }
         })
         .catch(err => {
@@ -788,6 +798,10 @@ const exportAsPDF = async () => {
 
 // 初始化地图
 const initMap = async () => {
+  if (!import.meta.env.VITE_AMAP_WEB_JS_KEY) {
+    message.warning('请在 frontend/.env 配置高德地图 JS API Key')
+    return
+  }
   try {
     const AMap = await AMapLoader.load({
       key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
@@ -833,6 +847,9 @@ const addAttractionMarkers = (AMap: any) => {
   })
 
   // 创建标记
+  const escapeHtml = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[character] || character)
   allAttractions.forEach((attraction, index) => {
     const marker = new AMap.Marker({
       position: [attraction.location.longitude, attraction.location.latitude],
@@ -847,10 +864,10 @@ const addAttractionMarkers = (AMap: any) => {
     const infoWindow = new AMap.InfoWindow({
       content: `
         <div style="padding: 10px;">
-          <h4 style="margin: 0 0 8px 0;">${attraction.name}</h4>
-          <p style="margin: 4px 0;"><strong>地址:</strong> ${attraction.address}</p>
-          <p style="margin: 4px 0;"><strong>游览时长:</strong> ${attraction.visit_duration}分钟</p>
-          <p style="margin: 4px 0;"><strong>描述:</strong> ${attraction.description}</p>
+          <h4 style="margin: 0 0 8px 0;">${escapeHtml(attraction.name)}</h4>
+          <p style="margin: 4px 0;"><strong>地址:</strong> ${escapeHtml(attraction.address)}</p>
+          <p style="margin: 4px 0;"><strong>游览时长:</strong> ${escapeHtml(attraction.visit_duration)}分钟</p>
+          <p style="margin: 4px 0;"><strong>描述:</strong> ${escapeHtml(attraction.description)}</p>
           <p style="margin: 4px 0; color: #1890ff;"><strong>第${attraction.dayIndex + 1}天 景点${attraction.attrIndex + 1}</strong></p>
         </div>
       `,
@@ -1388,4 +1405,3 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   }
 }
 </style>
-

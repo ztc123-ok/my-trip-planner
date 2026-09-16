@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 120000, // 2分钟超时
+  timeout: 300000, // 四个 Agent 顺序执行时留出足够时间
   headers: {
     'Content-Type': 'application/json'
   }
@@ -61,5 +61,9 @@ export async function healthCheck(): Promise<any> {
   }
 }
 
-export default apiClient
+export async function getAttractionPhoto(name: string): Promise<string | null> {
+  const response = await apiClient.get('/api/poi/photo', { params: { name } })
+  return response.data?.data?.photo_url || null
+}
 
+export default apiClient
