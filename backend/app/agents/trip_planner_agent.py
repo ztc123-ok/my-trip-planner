@@ -3,8 +3,8 @@
 import json
 from typing import Any
 from hello_agents import SimpleAgent
-from hello_agents.tools import MCPTool
 from ..services.llm_service import get_llm
+from ..services.amap_service import AmapService, create_amap_tool
 from ..models.schemas import TripRequest, TripPlan
 from ..config import get_settings
 
@@ -138,7 +138,7 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 ```
 
 **重要提示:**
-1. weather_info数组必须包含每一天的天气信息
+1. weather_info只能包含已提供的真实天气数据；如果某天没有预报则省略，不得编造
 2. 温度必须是纯数字(不要带°C等单位)
 3. 每天安排2-3个景点
 4. 考虑景点之间的距离和游览时间
@@ -165,14 +165,7 @@ class MultiAgentTripPlanner:
 
             # 创建共享的MCP工具(只创建一次)
             print("  - 创建共享MCP工具...")
-            self.amap_tool = MCPTool(
-                name="amap",
-                description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
-                env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                auto_expand=True
-            )
-            self.amap_tool.expandable=True
+            self.amap_tool = create_amap_tool(settings.amap_api_key)
 
             # 创建景点搜索Agent
             print("  - 创建景点搜索Agent...")
@@ -247,8 +240,23 @@ class MultiAgentTripPlanner:
 
             # 步骤2: 天气查询Agent查询天气
             print("🌤️  步骤2: 查询天气...")
-            weather_query = f"请查询{request.city}的天气信息"
-            weather_response = self.weather_agent.run(weather_query)
+            try:
+                weather_data = [
+                    item for item in AmapService(mcp_tool=self.amap_tool).get_weather(request.city)
+                    if request.start_date <= item.date <= request.end_date
+                ]
+            except Exception as weather_error:
+                weather_data = []
+                weather_response = f"高德天气查询不可用：{weather_error}。请勿编造天气数据。"
+            else:
+                if not weather_data:
+                    weather_response = "旅行日期内暂无可靠的天气预报，请勿编造天气数据。"
+                else:
+                    weather_query = f"请查询{request.city}的天气信息"
+                    try:
+                        weather_response = self.weather_agent.run(weather_query)
+                    except Exception as weather_error:
+                        weather_response = f"天气摘要不可用：{weather_error}。使用已获取的真实预报。"
             print(f"天气查询结果: {weather_response[:200]}...\n")
 
             # 步骤3: 酒店推荐Agent搜索酒店
@@ -259,12 +267,20 @@ class MultiAgentTripPlanner:
 
             # 步骤4: 行程规划Agent整合信息生成计划
             print("📋 步骤4: 生成行程计划...")
-            planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response)
+            verified_weather = json.dumps(
+                [item.model_dump() for item in weather_data], ensure_ascii=False
+            ) if weather_data else weather_response
+            planner_query = self._build_planner_query(
+                request, attraction_response, verified_weather, hotel_response
+            )
             planner_response = self.planner_agent.run(planner_query)
             print(f"行程规划结果: {planner_response[:300]}...\n")
 
             # 解析最终计划
             trip_plan = self._parse_response(planner_response, request)
+            trip_plan.weather_info = weather_data
+            if not weather_data:
+                trip_plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
@@ -319,6 +335,7 @@ class MultiAgentTripPlanner:
 3. 考虑景点之间的距离和交通方式
 4. 返回完整的JSON格式数据
 5. 景点的经纬度坐标要真实准确
+6. weather_info只能使用上文真实天气数据，若不可用则返回空数组
 """
         if request.free_text_input:
             query += f"\n**额外要求:** {request.free_text_input}"

@@ -1,13 +1,14 @@
 """无需 API 密钥的模型与高德响应转换测试。"""
 
 import json
+import sys
 import unittest
 from unittest.mock import patch
 
 from app.agents.trip_planner_agent import MultiAgentTripPlanner
 from app.api.main import app as api_app
 from app.models.schemas import TripRequest, TripPlan
-from app.services.amap_service import AmapService
+from app.services.amap_service import AmapService, create_amap_tool
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -42,11 +43,72 @@ class TripModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             agent._parse_response("没有 JSON", request())
 
+    def test_unavailable_weather_is_not_invented(self):
+        class FakeAgent:
+            def __init__(self, response):
+                self.response = response
+                self.calls = 0
+
+            def run(self, _query):
+                self.calls += 1
+                return self.response
+
+        trip_request = request(end_date="2026-10-01", travel_days=1)
+        plan_data = {
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "行程",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "attractions": [{
+                    "name": "故宫", "address": "北京",
+                    "location": {"longitude": 116.397, "latitude": 39.916},
+                    "visit_duration": 120, "description": "游览",
+                }],
+                "meals": [
+                    {"type": kind, "name": kind}
+                    for kind in ("breakfast", "lunch", "dinner")
+                ],
+            }],
+            "weather_info": [{
+                "date": "2026-10-01", "day_weather": "晴",
+            }],
+            "overall_suggestions": "建议",
+        }
+        agent = MultiAgentTripPlanner.__new__(MultiAgentTripPlanner)
+        agent.amap_tool = object()
+        agent.attraction_agent = FakeAgent("景点")
+        agent.weather_agent = FakeAgent("天气")
+        agent.hotel_agent = FakeAgent("酒店")
+        agent.planner_agent = FakeAgent(json.dumps(plan_data, ensure_ascii=False))
+        with patch("app.agents.trip_planner_agent.AmapService") as amap:
+            amap.return_value.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
+            plan = agent.plan_trip(trip_request)
+        self.assertEqual(plan.weather_info, [])
+        self.assertEqual(agent.weather_agent.calls, 0)
+        self.assertIn("天气预报", plan.overall_suggestions)
+
 
 class AmapServiceTests(unittest.TestCase):
     def service(self, payload):
         mcp = FakeMCP(payload)
         return AmapService(mcp_tool=mcp), mcp
+
+    def test_discovery_uses_backend_python(self):
+        tool = FakeMCP(None)
+        tool._available_tools = [
+            {"name": "maps_text_search"}, {"name": "maps_weather"}
+        ]
+        with patch("app.services.amap_service.MCPTool", return_value=tool) as factory:
+            self.assertIs(create_amap_tool("test-key"), tool)
+        self.assertEqual(factory.call_args.kwargs["server_command"][2], sys.executable)
+        self.assertTrue(tool.expandable)
+
+    def test_empty_discovery_fails_before_agent_runs(self):
+        tool = FakeMCP(None)
+        tool._available_tools = []
+        with patch("app.services.amap_service.MCPTool", return_value=tool):
+            with self.assertRaisesRegex(RuntimeError, "工具发现失败"):
+                create_amap_tool("test-key")
 
     def test_search_poi_parses_mcp_content(self):
         payload = {"content": [{"type": "text", "text": json.dumps({
@@ -75,10 +137,30 @@ class AmapServiceTests(unittest.TestCase):
         }]}})
         self.assertEqual(route.plan_route("甲", "乙").distance, 1200)
 
+    def test_actual_mcp_response_shapes(self):
+        search, _ = self.service({"pois": [{
+            "id": "B000A8UIN8", "name": "故宫博物院",
+            "address": "景山前街4号", "typecode": "110201",
+        }]})
+        pois = search.search_poi("故宫", "北京")
+        self.assertEqual(len(pois), 1)
+        self.assertIsNone(pois[0].location)
+        self.assertEqual(pois[0].type, "110201")
+
+        weather, _ = self.service({"forecasts": [{
+            "date": "2026-09-16", "dayweather": "晴", "nightweather": "多云",
+            "daytemp": "30", "nighttemp": "17", "daywind": "南",
+            "daypower": "1-3",
+        }]})
+        self.assertEqual(weather.get_weather("北京")[0].day_temp, 30)
+
     def test_api_error_is_not_reported_as_empty_success(self):
         service, _ = self.service({"status": "0", "info": "INVALID_USER_KEY"})
         with self.assertRaisesRegex(ValueError, "INVALID_USER_KEY"):
             service.search_poi("故宫", "北京")
+        service, _ = self.service({"error": "Get weather failed: UNKNOWN_ERROR"})
+        with self.assertRaisesRegex(ValueError, "UNKNOWN_ERROR"):
+            service.get_weather("香港")
 
 
 class ApiTests(unittest.TestCase):

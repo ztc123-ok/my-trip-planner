@@ -1,6 +1,8 @@
 """高德地图 MCP 服务与数据转换。"""
 
 import json
+import os
+import sys
 from typing import Any, Dict, List, Optional
 
 from hello_agents.tools import MCPTool
@@ -51,19 +53,40 @@ def as_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def create_amap_tool(api_key: str) -> MCPTool:
+    """发现并检查高德 MCP 工具，避免空工具被注册给 Agent。"""
+    if not api_key:
+        raise ValueError("请在 backend/.env 配置 AMAP_API_KEY")
+    tool_env = {"AMAP_MAPS_API_KEY": api_key}
+    for name in ("UV_CACHE_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR"):
+        if os.getenv(name):
+            tool_env[name] = os.environ[name]
+    tool = MCPTool(
+        name="amap",
+        description="高德地图服务",
+        # uvx 默认选择 PATH 中的 Python；Windows 上可能选到不兼容的 3.8。
+        server_command=["uvx", "--python", sys.executable, "amap-mcp-server"],
+        env=tool_env,
+        auto_expand=True,
+    )
+    available = {
+        item.get("name") for item in tool._available_tools if isinstance(item, dict)
+    }
+    required = {"maps_text_search", "maps_weather"}
+    if not required.issubset(available):
+        raise RuntimeError(
+            "高德 MCP 工具发现失败，缺少 "
+            + ", ".join(sorted(required - available))
+            + "。请确认 uvx 可运行、Python >=3.10、amap-mcp-server 能启动。"
+        )
+    tool.expandable = True
+    return tool
+
+
 class AmapService:
     def __init__(self, mcp_tool: Optional[MCPTool] = None):
         if mcp_tool is None:
-            api_key = get_settings().amap_api_key
-            if not api_key:
-                raise ValueError("请在 backend/.env 配置 AMAP_API_KEY")
-            mcp_tool = MCPTool(
-                name="amap",
-                description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
-                env={"AMAP_MAPS_API_KEY": api_key},
-                auto_expand=True,
-            )
+            mcp_tool = create_amap_tool(get_settings().amap_api_key)
         self.mcp_tool = mcp_tool
 
     def _call(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,6 +97,8 @@ class AmapService:
             raise ValueError("高德地图返回格式不正确")
         if str(result.get("status", "1")) == "0":
             raise ValueError(as_text(result.get("info") or "高德地图请求失败"))
+        if result.get("error"):
+            raise ValueError(as_text(result["error"]))
         return result
 
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
@@ -86,13 +111,13 @@ class AmapService:
         for poi in pois:
             if not isinstance(poi, dict):
                 continue
-            location = parse_location(poi.get("location"))
-            if location:
-                result.append(POIInfo(
-                    id=as_text(poi.get("id")), name=as_text(poi.get("name")),
-                    type=as_text(poi.get("type")), address=as_text(poi.get("address")),
-                    location=location, tel=as_text(poi.get("tel")) or None,
-                ))
+            result.append(POIInfo(
+                id=as_text(poi.get("id")), name=as_text(poi.get("name")),
+                type=as_text(poi.get("type") or poi.get("typecode")),
+                address=as_text(poi.get("address")),
+                location=parse_location(poi.get("location")),
+                tel=as_text(poi.get("tel")) or None,
+            ))
         return result
 
     def get_weather(self, city: str) -> List[WeatherInfo]:
@@ -103,7 +128,8 @@ class AmapService:
         for forecast in forecasts:
             if not isinstance(forecast, dict):
                 continue
-            for cast in forecast.get("casts", []):
+            casts = forecast.get("casts", [forecast])
+            for cast in casts:
                 if isinstance(cast, dict):
                     result.append(WeatherInfo(
                         date=as_text(cast.get("date")),

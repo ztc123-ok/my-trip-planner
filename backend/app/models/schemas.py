@@ -176,7 +176,7 @@ class POIInfo(BaseModel):
     name: str = Field(..., description="名称")
     type: str = Field(..., description="类型")
     address: str = Field(..., description="地址")
-    location: Location = Field(..., description="经纬度坐标")
+    location: Optional[Location] = Field(default=None, description="经纬度坐标；搜索结果未提供时为空")
     tel: Optional[str] = Field(default=None, description="电话")
 
 
