@@ -1,9 +1,16 @@
 """FastAPI主应用"""
 
+import sys
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
 from .routes import trip, poi, map as map_routes
+
+# Windows 的默认 GBK 输出流不能编码 Agent 日志中的 emoji。
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
 
 # 获取配置
 settings = get_settings()
@@ -96,4 +103,3 @@ if __name__ == "__main__":
         port=settings.port,
         reload=True
     )
-

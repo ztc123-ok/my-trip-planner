@@ -1,6 +1,7 @@
 """旅行规划API路由"""
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest,
     TripPlanResponse,
@@ -37,11 +38,11 @@ async def plan_trip(request: TripRequest):
 
         # 获取Agent实例
         print("🔄 获取多智能体系统实例...")
-        agent = get_trip_planner_agent()
+        agent = await run_in_threadpool(get_trip_planner_agent)
 
         # 生成旅行计划
         print("🚀 开始生成旅行计划...")
-        trip_plan = agent.plan_trip(request)
+        trip_plan = await run_in_threadpool(agent.plan_trip, request)
 
         print("✅ 旅行计划生成成功,准备返回响应\n")
 
@@ -70,17 +71,21 @@ async def health_check():
     """健康检查"""
     try:
         # 检查Agent是否可用
-        agent = get_trip_planner_agent()
+        agent = await run_in_threadpool(get_trip_planner_agent)
         
         return {
             "status": "healthy",
             "service": "trip-planner",
-            "agent_name": agent.agent.name,
-            "tools_count": len(agent.agent.list_tools())
+            "agent_name": "多智能体旅行规划系统",
+            "agents": [
+                agent.attraction_agent.name,
+                agent.weather_agent.name,
+                agent.hotel_agent.name,
+                agent.planner_agent.name,
+            ]
         }
     except Exception as e:
         raise HTTPException(
             status_code=503,
             detail=f"服务不可用: {str(e)}"
         )
-
