@@ -307,7 +307,7 @@ class MultiAgentTripPlanner:
                 trip_plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
             elif weather_source != "高德地图":
                 trip_plan.overall_suggestions += (
-                    f" 天气来源：{weather_source}；其中 Open-Meteo 与香港天文台的温度为当日最高/最低气温，"
+                    f" 天气来源：{weather_source}；Open-Meteo 的温度为当日最高/最低气温，"
                     "请在临行前复查。"
                 )
 

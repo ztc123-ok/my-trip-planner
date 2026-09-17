@@ -278,14 +278,14 @@
                 <div class="weather-info-row">
                   <span class="weather-icon">☀️</span>
                   <div>
-                    <div class="weather-label">{{ item.source === 'Open-Meteo' || item.source === '香港天文台' ? '最高' : '白天' }}</div>
+                    <div class="weather-label">{{ item.source === 'Open-Meteo' ? '最高' : '白天' }}</div>
                     <div class="weather-value">{{ item.day_weather }} {{ item.day_temp }}°C</div>
                   </div>
                 </div>
                 <div class="weather-info-row">
                   <span class="weather-icon">🌙</span>
                   <div>
-                    <div class="weather-label">{{ item.source === 'Open-Meteo' || item.source === '香港天文台' ? '最低' : '夜间' }}</div>
+                    <div class="weather-label">{{ item.source === 'Open-Meteo' ? '最低' : '夜间' }}</div>
                     <div class="weather-value">{{ item.night_weather }} {{ item.night_temp }}°C</div>
                   </div>
                 </div>
