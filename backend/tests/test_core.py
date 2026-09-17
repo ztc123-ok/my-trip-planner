@@ -6,11 +6,15 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import requests
 
-from app.agents.trip_planner_agent import MultiAgentTripPlanner
+from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_options
 from app.api.main import app as api_app
 from app.models.schemas import TripRequest, TripPlan
 from app.services.amap_service import AmapService, create_amap_tool
+from app.services.weather_service import (
+    get_hong_kong_forecast, get_open_meteo_hong_kong_forecast, get_trip_forecast,
+)
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -36,6 +40,14 @@ def request(**overrides):
 
 
 class TripModelTests(unittest.TestCase):
+    def test_qwen_planner_disables_default_thinking(self):
+        qwen = unittest.mock.Mock(provider="qwen", model="qwen3.8-flash", timeout=60)
+        self.assertEqual(planner_llm_options(qwen), {
+            "extra_body": {"enable_thinking": False}, "timeout": 90,
+        })
+        other = unittest.mock.Mock(provider="openai", model="other", timeout=60)
+        self.assertEqual(planner_llm_options(other), {})
+
     def test_rejects_inconsistent_dates(self):
         with self.assertRaises(ValidationError):
             request(travel_days=3)
@@ -51,7 +63,7 @@ class TripModelTests(unittest.TestCase):
                 self.response = response
                 self.calls = 0
 
-            def run(self, _query):
+            def run(self, _query, **_kwargs):
                 self.calls += 1
                 return self.response
 
@@ -167,6 +179,70 @@ class AmapServiceTests(unittest.TestCase):
         service, _ = self.service({"error": "Get weather failed: UNKNOWN_ERROR"})
         with self.assertRaisesRegex(ValueError, "UNKNOWN_ERROR"):
             service.get_weather("香港")
+
+
+class WeatherServiceTests(unittest.TestCase):
+    def test_hong_kong_forecast_uses_official_daily_values(self):
+        response = unittest.mock.Mock()
+        response.json.return_value = {"weatherForecast": [{
+            "forecastDate": "20260920", "forecastWeather": "多云有雨",
+            "forecastMaxtemp": {"value": 30},
+            "forecastMintemp": {"value": 25},
+            "forecastWind": "东风4级",
+        }]}
+        with patch("app.services.weather_service.requests.get", return_value=response) as get:
+            weather = get_hong_kong_forecast()
+        self.assertEqual(weather[0].date, "2026-09-20")
+        self.assertEqual(weather[0].day_temp, 30)
+        self.assertEqual(weather[0].night_temp, 25)
+        self.assertEqual(get.call_args.kwargs["params"]["dataType"], "fnd")
+
+    def test_hong_kong_uses_official_fallback_when_amap_fails(self):
+        amap = unittest.mock.Mock()
+        amap.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
+        weather = [unittest.mock.Mock(date="2026-09-20")]
+        with patch("app.services.weather_service.get_hong_kong_forecast", return_value=weather):
+            result, source = get_trip_forecast(
+                amap, "香港", "2026-09-20", "2026-09-24"
+            )
+        self.assertEqual(result, weather)
+        self.assertEqual(source, "香港天文台")
+
+    def test_hong_kong_forecast_retries_transient_timeout(self):
+        response = unittest.mock.Mock()
+        response.json.return_value = {"weatherForecast": [{
+            "forecastDate": "20260920", "forecastWeather": "多云",
+            "forecastMaxtemp": {"value": 29},
+            "forecastMintemp": {"value": 24},
+        }]}
+        with patch("app.services.weather_service.requests.get", side_effect=[
+            requests.ReadTimeout("temporary"), response,
+        ]) as get:
+            self.assertEqual(len(get_hong_kong_forecast()), 1)
+        self.assertEqual(get.call_count, 2)
+
+    def test_open_meteo_fallback_after_hko_failure(self):
+        response = unittest.mock.Mock()
+        response.json.return_value = {"daily": {
+            "time": ["2026-09-20"],
+            "temperature_2m_max": [29.4],
+            "temperature_2m_min": [25.2],
+            "weather_code": [61],
+        }}
+        with patch("app.services.weather_service.requests.get", return_value=response):
+            weather = get_open_meteo_hong_kong_forecast()
+        self.assertEqual(weather[0].day_weather, "小雨")
+        self.assertEqual(weather[0].day_temp, 29)
+
+        amap = unittest.mock.Mock()
+        amap.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
+        with patch("app.services.weather_service.get_hong_kong_forecast", side_effect=requests.ReadTimeout()), \
+                patch("app.services.weather_service.get_open_meteo_hong_kong_forecast", return_value=weather):
+            result, source = get_trip_forecast(
+                amap, "香港", "2026-09-20", "2026-09-24"
+            )
+        self.assertEqual(result, weather)
+        self.assertEqual(source, "Open-Meteo")
 
 
 class ApiTests(unittest.TestCase):

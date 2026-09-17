@@ -1,10 +1,12 @@
 """多智能体旅行规划系统"""
 
 import json
+import time
 from typing import Any
 from hello_agents import SimpleAgent
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
+from ..services.weather_service import get_trip_forecast
 from ..models.schemas import TripRequest, TripPlan
 from ..config import get_settings
 
@@ -152,6 +154,16 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 """
 
 
+def planner_llm_options(llm) -> dict:
+    """长 JSON 规划关闭千问 3 默认思考，减少等待和超时。"""
+    if getattr(llm, "provider", "") == "qwen" and str(getattr(llm, "model", "")).startswith("qwen3."):
+        return {
+            "extra_body": {"enable_thinking": False},
+            "timeout": max(90, getattr(llm, "timeout", 60)),
+        }
+    return {}
+
+
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
@@ -241,16 +253,18 @@ class MultiAgentTripPlanner:
             # 步骤2: 天气查询Agent查询天气
             print("🌤️  步骤2: 查询天气...")
             try:
-                weather_data = [
-                    item for item in AmapService(mcp_tool=self.amap_tool).get_weather(request.city)
-                    if request.start_date <= item.date <= request.end_date
-                ]
+                weather_data, weather_source = get_trip_forecast(
+                    AmapService(mcp_tool=self.amap_tool), request.city,
+                    request.start_date, request.end_date
+                )
             except Exception as weather_error:
                 weather_data = []
-                weather_response = f"高德天气查询不可用：{weather_error}。请勿编造天气数据。"
+                weather_response = f"天气查询不可用：{weather_error}。请勿编造天气数据。"
             else:
                 if not weather_data:
                     weather_response = "旅行日期内暂无可靠的天气预报，请勿编造天气数据。"
+                elif weather_source != "高德地图":
+                    weather_response = f"已取得 {weather_source} 的 {len(weather_data)} 天预报。"
                 else:
                     weather_query = f"请查询{request.city}的天气信息"
                     try:
@@ -273,7 +287,13 @@ class MultiAgentTripPlanner:
             planner_query = self._build_planner_query(
                 request, attraction_response, verified_weather, hotel_response
             )
-            planner_response = self.planner_agent.run(planner_query)
+            planner_started = time.monotonic()
+            try:
+                planner_response = self.planner_agent.run(
+                    planner_query, **planner_llm_options(getattr(self, "llm", None))
+                )
+            finally:
+                print(f"步骤4 模型调用耗时: {time.monotonic() - planner_started:.1f} 秒")
             print(f"行程规划结果: {planner_response[:300]}...\n")
 
             # 解析最终计划
@@ -281,6 +301,11 @@ class MultiAgentTripPlanner:
             trip_plan.weather_info = weather_data
             if not weather_data:
                 trip_plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
+            elif weather_source != "高德地图":
+                trip_plan.overall_suggestions += (
+                    f" 天气来源：{weather_source}；温度为当日最高/最低气温，"
+                    "请在临行前复查。"
+                )
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
