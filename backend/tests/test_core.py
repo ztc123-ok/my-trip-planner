@@ -1,6 +1,7 @@
 """无需 API 密钥的模型与高德响应转换测试。"""
 
 import json
+import os
 import sys
 import unittest
 from unittest.mock import patch
@@ -98,9 +99,12 @@ class AmapServiceTests(unittest.TestCase):
         tool._available_tools = [
             {"name": "maps_text_search"}, {"name": "maps_weather"}
         ]
-        with patch("app.services.amap_service.MCPTool", return_value=tool) as factory:
+        with patch.dict(os.environ, {
+            "UV_CACHE_DIR": "", "UV_TOOL_DIR": "", "UV_TOOL_BIN_DIR": "",
+        }), patch("app.services.amap_service.MCPTool", return_value=tool) as factory:
             self.assertIs(create_amap_tool("test-key"), tool)
         self.assertEqual(factory.call_args.kwargs["server_command"][2], sys.executable)
+        self.assertTrue(factory.call_args.kwargs["env"]["UV_CACHE_DIR"].endswith(".uv-cache"))
         self.assertTrue(tool.expandable)
 
     def test_empty_discovery_fails_before_agent_runs(self):

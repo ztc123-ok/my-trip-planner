@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hello_agents.tools import MCPTool
@@ -57,10 +58,13 @@ def create_amap_tool(api_key: str) -> MCPTool:
     """发现并检查高德 MCP 工具，避免空工具被注册给 Agent。"""
     if not api_key:
         raise ValueError("请在 backend/.env 配置 AMAP_API_KEY")
-    tool_env = {"AMAP_MAPS_API_KEY": api_key}
-    for name in ("UV_CACHE_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR"):
-        if os.getenv(name):
-            tool_env[name] = os.environ[name]
+    runtime_dir = Path(__file__).resolve().parents[2]
+    tool_env = {
+        "AMAP_MAPS_API_KEY": api_key,
+        "UV_CACHE_DIR": os.getenv("UV_CACHE_DIR") or str(runtime_dir / ".uv-cache"),
+        "UV_TOOL_DIR": os.getenv("UV_TOOL_DIR") or str(runtime_dir / ".uv-tools"),
+        "UV_TOOL_BIN_DIR": os.getenv("UV_TOOL_BIN_DIR") or str(runtime_dir / ".uv-bin"),
+    }
     tool = MCPTool(
         name="amap",
         description="高德地图服务",
@@ -77,7 +81,8 @@ def create_amap_tool(api_key: str) -> MCPTool:
         raise RuntimeError(
             "高德 MCP 工具发现失败，缺少 "
             + ", ".join(sorted(required - available))
-            + "。请确认 uvx 可运行、Python >=3.10、amap-mcp-server 能启动。"
+            + "。请确认 uvx 可运行、amap-mcp-server 能启动，"
+            + f"并检查缓存目录 {tool_env['UV_CACHE_DIR']} 是否可写。"
         )
     tool.expandable = True
     return tool
