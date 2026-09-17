@@ -54,7 +54,7 @@
                 第{{ day.day_index + 1 }}天
               </a-menu-item>
             </a-sub-menu>
-            <a-menu-item key="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0">
+            <a-menu-item key="weather">
               <span>🌤️ 天气信息</span>
             </a-menu-item>
           </a-menu>
@@ -257,8 +257,16 @@
           </a-collapse>
         </a-card>
 
-        <a-card id="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0" title="天气信息" style="margin-top: 20px" :bordered="false">
+        <a-card id="weather" title="天气信息" style="margin-top: 20px" :bordered="false">
+        <a-alert
+          v-if="missingWeatherDates.length > 0"
+          type="info"
+          show-icon
+          :message="`当前仅显示行程日期内已有的天气预报；${missingWeatherDates.join('、')} 暂无预报，请临行前再查询。`"
+          style="margin-bottom: 16px"
+        />
         <a-list
+          v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0"
           :data-source="tripPlan.weather_info"
           :grid="{ gutter: 16, column: 3 }"
         >
@@ -287,6 +295,7 @@
             </a-list-item>
           </template>
         </a-list>
+        <a-empty v-else description="行程日期暂无可用天气预报" />
         </a-card>
       </div>
     </div>
@@ -311,7 +320,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { DownOutlined } from '@ant-design/icons-vue'
@@ -320,6 +329,7 @@ import * as L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
+import dayjs from 'dayjs'
 import type { Attraction, TripPlan } from '@/types'
 import { getAttractionPhoto } from '@/services/api'
 
@@ -330,6 +340,18 @@ const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
+const missingWeatherDates = computed(() => {
+  if (!tripPlan.value) return []
+
+  const forecastDates = new Set((tripPlan.value.weather_info ?? []).map(item => item.date))
+  const missingDates: string[] = []
+  const end = dayjs(tripPlan.value.end_date)
+  for (let date = dayjs(tripPlan.value.start_date); date.isValid() && !date.isAfter(end, 'day'); date = date.add(1, 'day')) {
+    const value = date.format('YYYY-MM-DD')
+    if (!forecastDates.has(value)) missingDates.push(value)
+  }
+  return missingDates
+})
 let map: any = null
 let mapProvider: 'amap' | 'leaflet' | null = null
 let mapGeneration = 0

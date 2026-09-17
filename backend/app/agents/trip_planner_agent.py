@@ -257,6 +257,10 @@ class MultiAgentTripPlanner:
                     AmapService(mcp_tool=self.amap_tool), request.city,
                     request.start_date, request.end_date
                 )
+                print(
+                    f"行程日期内有效天气预报: {len(weather_data)} 天 "
+                    f"({', '.join(item.date for item in weather_data) or '无'})，来源: {weather_source}"
+                )
             except Exception as weather_error:
                 weather_data = []
                 weather_response = f"天气查询不可用：{weather_error}。请勿编造天气数据。"
