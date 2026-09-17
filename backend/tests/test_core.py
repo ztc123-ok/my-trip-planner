@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.agents.trip_planner_agent import MultiAgentTripPlanner
@@ -104,6 +105,7 @@ class AmapServiceTests(unittest.TestCase):
         }), patch("app.services.amap_service.MCPTool", return_value=tool) as factory:
             self.assertIs(create_amap_tool("test-key"), tool)
         self.assertEqual(factory.call_args.kwargs["server_command"][2], sys.executable)
+        self.assertTrue(Path(factory.call_args.kwargs["server_command"][0]).is_file())
         self.assertTrue(factory.call_args.kwargs["env"]["UV_CACHE_DIR"].endswith(".uv-cache"))
         self.assertTrue(tool.expandable)
 
