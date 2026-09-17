@@ -111,7 +111,10 @@
           <!-- 右侧:地图 -->
           <div class="right-map">
             <a-card id="map" title="📍 景点地图" :bordered="false" class="map-card">
-              <div id="amap-container" style="width: 100%; height: 100%"></div>
+              <div class="map-surface">
+                <div id="amap-container"></div>
+                <div v-if="mapStatus" class="map-status">{{ mapStatus }}</div>
+              </div>
             </a-card>
           </div>
         </div>
@@ -308,14 +311,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
+import * as L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { TripPlan } from '@/types'
+import type { Attraction, TripPlan } from '@/types'
 import { getAttractionPhoto } from '@/services/api'
 
 const router = useRouter()
@@ -326,17 +331,24 @@ const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
 let map: any = null
+let mapProvider: 'amap' | 'leaflet' | null = null
+let mapGeneration = 0
+const mapStatus = ref('地图加载中…')
 
 onMounted(async () => {
   const data = sessionStorage.getItem('tripPlan')
   if (data) {
     tripPlan.value = JSON.parse(data)
-    // 加载景点图片
-    await loadAttractionPhotos()
-    // 等待DOM渲染完成后初始化地图
+    // 地图先渲染，景点图片请求不阻塞地图初始化。
     await nextTick()
-    initMap()
+    void initMap()
+    void loadAttractionPhotos()
   }
+})
+
+onUnmounted(() => {
+  mapGeneration += 1
+  destroyMap()
 })
 
 const goBack = () => {
@@ -380,11 +392,8 @@ const saveChanges = () => {
   message.success('修改已保存')
 
   // 重新初始化地图以反映更改
-  if (map) {
-    map.destroy()
-  }
   nextTick(() => {
-    initMap()
+    void initMap()
   })
 }
 
@@ -797,59 +806,106 @@ const exportAsPDF = async () => {
 }
 
 // 初始化地图
-const initMap = async () => {
-  if (!import.meta.env.VITE_AMAP_WEB_JS_KEY) {
-    message.warning('请在 frontend/.env 配置高德地图 JS API Key')
-    return
+type MappedAttraction = Attraction & { dayIndex: number; attrIndex: number }
+
+const collectMapAttractions = (): MappedAttraction[] => {
+  if (!tripPlan.value) return []
+  return tripPlan.value.days.flatMap((day, dayIndex) =>
+    day.attractions.flatMap((attraction, attrIndex) => {
+      const longitude = Number(attraction.location?.longitude)
+      const latitude = Number(attraction.location?.latitude)
+      if (!Number.isFinite(longitude) || !Number.isFinite(latitude) ||
+          Math.abs(longitude) > 180 || Math.abs(latitude) > 90 ||
+          (longitude === 0 && latitude === 0)) return []
+      return [{ ...attraction, location: { longitude, latitude }, dayIndex, attrIndex }]
+    })
+  )
+}
+
+const escapeHtml = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, character => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+})[character] || character)
+
+const markerContent = (attraction: MappedAttraction): string => `
+  <div style="padding: 10px;">
+    <h4 style="margin: 0 0 8px 0;">${escapeHtml(attraction.name)}</h4>
+    <p style="margin: 4px 0;"><strong>地址:</strong> ${escapeHtml(attraction.address)}</p>
+    <p style="margin: 4px 0;"><strong>游览时长:</strong> ${escapeHtml(attraction.visit_duration)}分钟</p>
+    <p style="margin: 4px 0;"><strong>描述:</strong> ${escapeHtml(attraction.description)}</p>
+    <p style="margin: 4px 0; color: #1890ff;"><strong>第${attraction.dayIndex + 1}天 景点${attraction.attrIndex + 1}</strong></p>
+  </div>
+`
+
+const destroyMap = () => {
+  if (map) {
+    if (mapProvider === 'leaflet') map.remove()
+    else map.destroy()
   }
+  map = null
+  mapProvider = null
+}
+
+const initMap = async () => {
+  const generation = ++mapGeneration
+  destroyMap()
+  mapStatus.value = '地图加载中…'
+  const container = document.getElementById('amap-container')
+  if (!container) return
+  const attractions = collectMapAttractions()
+  const key = (import.meta.env.VITE_AMAP_WEB_JS_KEY || '').trim()
+  const securityCode = (import.meta.env.VITE_AMAP_SECURITY_JS_CODE || '').trim()
+
+  if (key && securityCode && !key.startsWith('your_') && !securityCode.startsWith('your_')) {
+    let timeoutId: number | undefined
+    try {
+      ;(window as any)._AMapSecurityConfig = { securityJsCode: securityCode }
+      const AMap = await Promise.race([
+        AMapLoader.load({ key, version: '2.0', plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow'] }),
+        new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => reject(new Error('高德地图加载超时')), 12000)
+        })
+      ])
+      if (generation !== mapGeneration) return
+      map = new AMap.Map(container, {
+        zoom: 12,
+        center: [116.397128, 39.916527],
+        viewMode: '2D'
+      })
+      mapProvider = 'amap'
+      addAttractionMarkers(AMap, attractions)
+      mapStatus.value = attractions.length ? '' : '行程景点暂无可用坐标'
+      return
+    } catch (error) {
+      console.warn('高德地图不可用，切换到备用地图:', error)
+      destroyMap()
+    } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId)
+    }
+  }
+
+  if (generation !== mapGeneration) return
   try {
-    const AMap = await AMapLoader.load({
-      key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
-      version: '2.0',
-      plugins: ['AMap.Marker', 'AMap.Polyline', 'AMap.InfoWindow']
+    map = L.map(container, { scrollWheelZoom: false }).setView([20, 0], 2)
+    mapProvider = 'leaflet'
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map)
+    addLeafletMarkers(attractions)
+    mapStatus.value = attractions.length ? '' : '行程景点暂无可用坐标'
+    window.requestAnimationFrame(() => {
+      if (generation === mapGeneration) map.invalidateSize()
     })
-
-    // 创建地图实例
-    map = new AMap.Map('amap-container', {
-      zoom: 12,
-      center: [116.397128, 39.916527], // 默认中心点(北京)
-      viewMode: '3D'
-    })
-
-    // 添加景点标记
-    addAttractionMarkers(AMap)
-
-    message.success('地图加载成功')
   } catch (error) {
-    console.error('地图加载失败:', error)
-    message.error('地图加载失败')
+    console.error('备用地图加载失败:', error)
+    mapStatus.value = '地图加载失败，请刷新页面重试'
+    destroyMap()
   }
 }
 
 // 添加景点标记
-const addAttractionMarkers = (AMap: any) => {
-  if (!tripPlan.value) return
-
+const addAttractionMarkers = (AMap: any, allAttractions: MappedAttraction[]) => {
   const markers: any[] = []
-  const allAttractions: any[] = []
-
-  // 收集所有景点
-  tripPlan.value.days.forEach((day, dayIndex) => {
-    day.attractions.forEach((attraction, attrIndex) => {
-      if (attraction.location && attraction.location.longitude && attraction.location.latitude) {
-        allAttractions.push({
-          ...attraction,
-          dayIndex,
-          attrIndex
-        })
-      }
-    })
-  })
-
-  // 创建标记
-  const escapeHtml = (value: unknown): string => String(value ?? '').replace(/[&<>"']/g, character => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[character] || character)
   allAttractions.forEach((attraction, index) => {
     const marker = new AMap.Marker({
       position: [attraction.location.longitude, attraction.location.latitude],
@@ -862,15 +918,7 @@ const addAttractionMarkers = (AMap: any) => {
 
     // 创建信息窗口
     const infoWindow = new AMap.InfoWindow({
-      content: `
-        <div style="padding: 10px;">
-          <h4 style="margin: 0 0 8px 0;">${escapeHtml(attraction.name)}</h4>
-          <p style="margin: 4px 0;"><strong>地址:</strong> ${escapeHtml(attraction.address)}</p>
-          <p style="margin: 4px 0;"><strong>游览时长:</strong> ${escapeHtml(attraction.visit_duration)}分钟</p>
-          <p style="margin: 4px 0;"><strong>描述:</strong> ${escapeHtml(attraction.description)}</p>
-          <p style="margin: 4px 0; color: #1890ff;"><strong>第${attraction.dayIndex + 1}天 景点${attraction.attrIndex + 1}</strong></p>
-        </div>
-      `,
+      content: markerContent(attraction),
       offset: new AMap.Pixel(0, -30)
     })
 
@@ -892,6 +940,40 @@ const addAttractionMarkers = (AMap: any) => {
 
   // 绘制路线
   drawRoutes(AMap, allAttractions)
+}
+
+const addLeafletMarkers = (attractions: MappedAttraction[]) => {
+  const markers = attractions.map((attraction, index) => {
+    const icon = L.divIcon({
+      className: 'attraction-pin',
+      html: `<span>${index + 1}</span>`,
+      iconSize: [30, 30],
+      iconAnchor: [15, 30]
+    })
+    return L.marker([attraction.location.latitude, attraction.location.longitude], { icon })
+      .addTo(map)
+      .bindPopup(markerContent(attraction))
+  })
+
+  const dayGroups = new Map<number, MappedAttraction[]>()
+  attractions.forEach(attraction => {
+    const group = dayGroups.get(attraction.dayIndex) || []
+    group.push(attraction)
+    dayGroups.set(attraction.dayIndex, group)
+  })
+  dayGroups.forEach(group => {
+    if (group.length > 1) {
+      L.polyline(group.map(item => [item.location.latitude, item.location.longitude]), {
+        color: '#1890ff', weight: 4, opacity: 0.8
+      }).addTo(map)
+    }
+  })
+
+  if (markers.length === 1) {
+    map.setView(markers[0].getLatLng(), 13)
+  } else if (markers.length > 1) {
+    map.fitBounds(L.featureGroup(markers).getBounds(), { padding: [32, 32], maxZoom: 14 })
+  }
 }
 
 // 绘制路线
@@ -1146,6 +1228,7 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 
 .right-map {
   flex: 1;
+  min-width: 0;
 }
 
 /* 行程概览卡片 */
@@ -1238,6 +1321,49 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 .map-card :deep(.ant-card-body) {
   height: calc(100% - 57px);
   padding: 0;
+}
+
+.map-surface {
+  position: relative;
+  width: 100%;
+  height: 440px;
+}
+
+#amap-container {
+  width: 100%;
+  height: 100%;
+}
+
+.map-status {
+  position: absolute;
+  inset: 0;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  color: #475569;
+  background: rgba(248, 250, 252, 0.9);
+  text-align: center;
+}
+
+.map-surface :deep(.attraction-pin) {
+  border: 2px solid white;
+  border-radius: 50% 50% 50% 0;
+  color: white;
+  background: #1890ff;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.3);
+}
+
+.map-surface :deep(.attraction-pin span) {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  transform: rotate(45deg);
 }
 
 /* 每日行程卡片 */
@@ -1402,6 +1528,14 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   .page-header {
     flex-direction: column;
     gap: 16px;
+  }
+
+  .top-info-section {
+    flex-direction: column;
+  }
+
+  .left-info {
+    flex: auto;
   }
 }
 </style>
