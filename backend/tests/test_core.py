@@ -10,10 +10,11 @@ import requests
 
 from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_options
 from app.api.main import app as api_app
-from app.models.schemas import TripRequest, TripPlan
+from app.models.schemas import TripRequest, TripPlan, WeatherInfo
 from app.services.amap_service import AmapService, create_amap_tool
 from app.services.weather_service import (
-    get_hong_kong_forecast, get_open_meteo_hong_kong_forecast, get_trip_forecast,
+    get_hong_kong_forecast, get_open_meteo_forecast,
+    get_open_meteo_hong_kong_forecast, get_trip_forecast,
 )
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -94,7 +95,8 @@ class TripModelTests(unittest.TestCase):
         agent.weather_agent = FakeAgent("天气")
         agent.hotel_agent = FakeAgent("酒店")
         agent.planner_agent = FakeAgent(json.dumps(plan_data, ensure_ascii=False))
-        with patch("app.agents.trip_planner_agent.AmapService") as amap:
+        with patch("app.agents.trip_planner_agent.AmapService") as amap, \
+                patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError("城市查询失败")):
             amap.return_value.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
             plan = agent.plan_trip(trip_request)
         self.assertEqual(plan.weather_info, [])
@@ -201,7 +203,8 @@ class WeatherServiceTests(unittest.TestCase):
         amap = unittest.mock.Mock()
         amap.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
         weather = [unittest.mock.Mock(date="2026-09-20")]
-        with patch("app.services.weather_service.get_hong_kong_forecast", return_value=weather):
+        with patch("app.services.weather_service.get_hong_kong_forecast", return_value=weather), \
+                patch("app.services.weather_service.get_open_meteo_hong_kong_forecast", return_value=[]):
             result, source = get_trip_forecast(
                 amap, "香港", "2026-09-20", "2026-09-24"
             )
@@ -243,6 +246,45 @@ class WeatherServiceTests(unittest.TestCase):
             )
         self.assertEqual(result, weather)
         self.assertEqual(source, "Open-Meteo")
+
+    def test_short_amap_forecast_is_completed_for_trip_dates(self):
+        amap = unittest.mock.Mock()
+        amap.get_weather.return_value = [
+            WeatherInfo(date=f"2026-09-{day:02d}", source="高德地图", day_temp=30)
+            for day in range(17, 21)
+        ]
+        supplement = [
+            WeatherInfo(date=f"2026-09-{day:02d}", source="Open-Meteo", day_temp=25)
+            for day in range(20, 25)
+        ]
+        with patch("app.services.weather_service.get_open_meteo_forecast", return_value=supplement) as fallback:
+            result, source = get_trip_forecast(amap, "杭州", "2026-09-20", "2026-09-24")
+        self.assertEqual([item.date for item in result], [f"2026-09-{day:02d}" for day in range(20, 25)])
+        self.assertEqual(result[0].source, "高德地图")
+        self.assertTrue(all(item.source == "Open-Meteo" for item in result[1:]))
+        self.assertEqual(source, "高德地图 + Open-Meteo")
+        fallback.assert_called_once_with("杭州")
+
+    def test_open_meteo_resolves_city_before_forecast(self):
+        location = unittest.mock.Mock()
+        location.json.return_value = {"results": [{
+            "name": "杭州", "population": 9236032,
+            "latitude": 30.29365, "longitude": 120.16142,
+            "timezone": "Asia/Shanghai",
+        }]}
+        forecast = unittest.mock.Mock()
+        forecast.json.return_value = {"daily": {
+            "time": ["2026-09-24"],
+            "temperature_2m_max": [32.4],
+            "temperature_2m_min": [24.1],
+            "weather_code": [61],
+        }}
+        with patch("app.services.weather_service.requests.get", side_effect=[location, forecast]) as get:
+            result = get_open_meteo_forecast("杭州市")
+        self.assertEqual(result[0].date, "2026-09-24")
+        self.assertEqual(result[0].source, "Open-Meteo")
+        self.assertEqual(get.call_args_list[0].kwargs["params"]["name"], "杭州")
+        self.assertEqual(get.call_args_list[1].kwargs["params"]["forecast_days"], 16)
 
 
 class ApiTests(unittest.TestCase):

@@ -122,6 +122,7 @@ class DayPlan(BaseModel):
 class WeatherInfo(BaseModel):
     """天气信息"""
     date: str = Field(..., description="日期 YYYY-MM-DD")
+    source: str = Field(default="", description="天气预报来源")
     day_weather: str = Field(default="", description="白天天气")
     night_weather: str = Field(default="", description="夜间天气")
     day_temp: Union[int, str] = Field(default=0, description="白天温度")

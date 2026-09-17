@@ -274,21 +274,22 @@
             <a-list-item>
               <a-card size="small" class="weather-card">
                 <div class="weather-date">{{ item.date }}</div>
+                <div v-if="item.source" class="weather-source">来源：{{ item.source }}</div>
                 <div class="weather-info-row">
                   <span class="weather-icon">☀️</span>
                   <div>
-                    <div class="weather-label">白天</div>
+                    <div class="weather-label">{{ item.source === 'Open-Meteo' || item.source === '香港天文台' ? '最高' : '白天' }}</div>
                     <div class="weather-value">{{ item.day_weather }} {{ item.day_temp }}°C</div>
                   </div>
                 </div>
                 <div class="weather-info-row">
                   <span class="weather-icon">🌙</span>
                   <div>
-                    <div class="weather-label">夜间</div>
+                    <div class="weather-label">{{ item.source === 'Open-Meteo' || item.source === '香港天文台' ? '最低' : '夜间' }}</div>
                     <div class="weather-value">{{ item.night_weather }} {{ item.night_temp }}°C</div>
                   </div>
                 </div>
-                <div class="weather-wind">
+                <div v-if="item.wind_direction || item.wind_power" class="weather-wind">
                   💨 {{ item.wind_direction }} {{ item.wind_power }}
                 </div>
               </a-card>
@@ -1162,7 +1163,14 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   font-size: 16px;
   font-weight: bold;
   color: #00796b;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
+  text-align: center;
+}
+
+.weather-source {
+  color: #52676a;
+  font-size: 12px;
+  margin-bottom: 10px;
   text-align: center;
 }
 

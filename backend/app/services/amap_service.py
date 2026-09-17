@@ -156,6 +156,7 @@ class AmapService:
                 if isinstance(cast, dict):
                     result.append(WeatherInfo(
                         date=as_text(cast.get("date")),
+                        source="高德地图",
                         day_weather=as_text(cast.get("dayweather")),
                         night_weather=as_text(cast.get("nightweather")),
                         day_temp=cast.get("daytemp", 0),

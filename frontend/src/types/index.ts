@@ -58,6 +58,7 @@ export interface DayPlan {
 
 export interface WeatherInfo {
   date: string
+  source?: string
   day_weather: string
   night_weather: string
   day_temp: number
@@ -92,4 +93,3 @@ export interface TripPlanResponse {
   message: string
   data?: TripPlan
 }
-
