@@ -11,6 +11,7 @@ from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_opt
 from app.api.main import app as api_app
 from app.models.schemas import TripRequest, TripPlan, WeatherInfo
 from app.services.amap_service import AmapService, create_amap_tool
+from app.services.duckduckgo_service import DuckDuckGoPhotoService
 from app.services.weather_service import (
     get_open_meteo_forecast, get_trip_forecast,
 )
@@ -261,6 +262,45 @@ class WeatherServiceTests(unittest.TestCase):
         self.assertEqual(get.call_args_list[1].kwargs["params"]["forecast_days"], 16)
 
 
+class DuckDuckGoPhotoServiceTests(unittest.TestCase):
+    def test_searches_duckduckgo_images_and_reuses_successful_url(self):
+        tool = FakeMCP("工具 'search_images' 执行结果:\n" + json.dumps([
+            {"title": "网页", "url": "https://example.com/page"},
+            {"title": "西湖实景", "image": "https://example.com/west-lake.jpg"},
+        ], ensure_ascii=False))
+        tool._available_tools = [{"name": "search_images"}]
+        service = DuckDuckGoPhotoService(mcp_tool=tool)
+
+        self.assertEqual(
+            service.get_photo_url("西湖", "杭州"), "https://example.com/west-lake.jpg"
+        )
+        self.assertEqual(
+            service.get_photo_url("西湖", "杭州"), "https://example.com/west-lake.jpg"
+        )
+        self.assertEqual(len(tool.calls), 1)
+        self.assertEqual(tool.calls[0]["tool_name"], "search_images")
+        self.assertEqual(tool.calls[0]["arguments"]["backend"], "duckduckgo")
+        self.assertIn("杭州 西湖", tool.calls[0]["arguments"]["query"])
+
+    def test_rejects_mcp_errors_instead_of_returning_non_image_url(self):
+        tool = FakeMCP("异步操作失败: Error executing tool search_images")
+        tool._available_tools = [{"name": "search_images"}]
+        with self.assertRaises(ValueError):
+            DuckDuckGoPhotoService(mcp_tool=tool).get_photo_url("西湖")
+
+    def test_parses_mcp_list_repr_and_skips_unsafe_image_url(self):
+        tool = FakeMCP(
+            "工具 'search_images' 执行结果:\n"
+            "[{'image': 'javascript:alert(1)'}, "
+            "{'thumbnail': 'https://example.com/west-lake-thumb.jpg'}]"
+        )
+        tool._available_tools = [{"name": "search_images"}]
+        self.assertEqual(
+            DuckDuckGoPhotoService(mcp_tool=tool).get_photo_url("西湖"),
+            "https://example.com/west-lake-thumb.jpg",
+        )
+
+
 class ApiTests(unittest.TestCase):
     def test_map_endpoint_serializes_parsed_poi(self):
         service = AmapService(mcp_tool=FakeMCP({"pois": [{
@@ -273,6 +313,17 @@ class ApiTests(unittest.TestCase):
             response = client.get("/api/map/poi", params={"keywords": "故宫", "city": "北京"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"][0]["name"], "故宫")
+
+    def test_photo_endpoint_returns_duckduckgo_image_url(self):
+        service = unittest.mock.Mock()
+        service.get_photo_url.return_value = "https://example.com/west-lake.jpg"
+        with patch("app.api.main.validate_config"), patch(
+            "app.api.routes.poi.get_duckduckgo_photo_service", return_value=service
+        ), TestClient(api_app) as client:
+            response = client.get("/api/poi/photo", params={"name": "西湖", "city": "杭州"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["photo_url"], "https://example.com/west-lake.jpg")
+        service.get_photo_url.assert_called_once_with("西湖", "杭州")
 
     def test_trip_endpoint_returns_agent_plan(self):
         class FakeAgent:

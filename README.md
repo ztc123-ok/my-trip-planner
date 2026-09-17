@@ -11,7 +11,7 @@
 
 ## 运行
 
-需要 Python 3.10+、Node.js 18+、高德地图 Web 服务和 JavaScript API 密钥、可用的 LLM API 密钥。Unsplash 密钥用于景点照片，可选。高德 MCP 服务由 `uvx` 启动。
+需要 Python 3.10+、Node.js 18+、高德地图 Web 服务和 JavaScript API 密钥、可用的 LLM API 密钥。景点图片通过 DuckDuckGo MCP 搜索，无需 Unsplash 密钥；高德和 DuckDuckGo MCP 服务由 `uvx` 启动。若无法直连 DuckDuckGo，可在 `backend/.env` 配置 `DDGS_PROXY`。
 
 ```powershell
 cd backend

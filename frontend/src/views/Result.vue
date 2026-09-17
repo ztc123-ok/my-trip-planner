@@ -472,10 +472,11 @@ const loadAttractionPhotos = async () => {
   if (!tripPlan.value) return
 
   const promises: Promise<void>[] = []
+  const city = tripPlan.value.city
 
   tripPlan.value.days.forEach(day => {
     day.attractions.forEach(attraction => {
-      const promise = getAttractionPhoto(attraction.name)
+      const promise = getAttractionPhoto(attraction.name, city)
         .then(url => {
           if (url) {
             attractionPhotos.value[attraction.name] = url

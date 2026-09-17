@@ -61,8 +61,8 @@ export async function healthCheck(): Promise<any> {
   }
 }
 
-export async function getAttractionPhoto(name: string): Promise<string | null> {
-  const response = await apiClient.get('/api/poi/photo', { params: { name } })
+export async function getAttractionPhoto(name: string, city: string): Promise<string | null> {
+  const response = await apiClient.get('/api/poi/photo', { params: { name, city } })
   return response.data?.data?.photo_url || null
 }
 
