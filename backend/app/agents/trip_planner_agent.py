@@ -2,7 +2,7 @@
 
 import json
 import time
-from typing import TypedDict
+from typing import TypedDict, Literal
 
 from langgraph.graph import END, START, StateGraph
 
@@ -122,6 +122,22 @@ class TripGraphState(TypedDict, total=False):
     hotel_response: str
     planner_response: str
     trip_plan: TripPlan
+    retry_count: int          # 当前重试次数（0=首次尝试）
+    validation_error: str     # 校验失败原因，重试时传给 planner 作改进提示
+
+
+# 最大重试次数：校验失败后最多回到 planner 重新生成的次数
+MAX_PLAN_RETRIES = 2
+
+
+def _should_retry(state: TripGraphState) -> Literal["planner", "__end__"]:
+    """条件路由：校验通过 → END，失败且未超限 → planner 重试。"""
+    if state.get("trip_plan") is not None:
+        return END
+    if state.get("retry_count", 0) <= MAX_PLAN_RETRIES:
+        return "planner"
+    # 超过重试次数，_validate_plan 已抛出异常，此分支理论上不可达
+    return END
 
 
 class MultiAgentTripPlanner:
@@ -146,7 +162,7 @@ class MultiAgentTripPlanner:
             builder.add_edge(START, node)
         builder.add_edge(["attractions", "weather", "hotels"], "planner")
         builder.add_edge("planner", "validate")
-        builder.add_edge("validate", END)
+        builder.add_conditional_edges("validate", _should_retry)
         self.graph = builder.compile()
 
     def plan_trip(self, request: TripRequest) -> TripPlan:
@@ -178,11 +194,14 @@ class MultiAgentTripPlanner:
             )
         except Exception as exc:
             weather_data, weather_source = [], ""
+            print(f"⏭️  天气查询失败({exc})，跳过天气摘要生成")
             weather_response = f"天气查询不可用：{exc}。请勿编造天气数据。"
         else:
             if not weather_data:
+                print("⏭️  天气不可用，跳过天气摘要生成")
                 weather_response = "旅行日期内暂无可靠的天气预报，请勿编造天气数据。"
             elif weather_source != "高德地图":
+                print(f"⏭️  天气来源为 {weather_source}，跳过 LLM 天气摘要")
                 weather_response = f"已取得 {weather_source} 的 {len(weather_data)} 天预报。"
             else:
                 verified = json.dumps(
@@ -215,15 +234,22 @@ class MultiAgentTripPlanner:
 
     def _generate_plan(self, state: TripGraphState) -> dict:
         request = state["request"]
-        print("📋 查询汇总完成，生成行程计划...")
-        weather_data = state["weather_data"]
+        retry_count = state.get("retry_count", 0)
+        validation_error = state.get("validation_error", "")
+        if validation_error:
+            print(f"🔄 第 {retry_count + 1} 次重试规划，上次失败原因: {validation_error}")
+        else:
+            print("📋 查询汇总完成，生成行程计划...")
+        weather_data = state.get("weather_data", [])
         verified_weather = (
             json.dumps([item.model_dump(mode="json") for item in weather_data], ensure_ascii=False)
-            if weather_data else state["weather_response"]
+            if weather_data else state.get("weather_response", "天气不可用")
         )
         query = self._build_planner_query(
             request, state["attraction_response"], verified_weather, state["hotel_response"]
         )
+        if validation_error:
+            query += f"\n\n**上次生成的计划未通过校验，请修正以下问题:** {validation_error}"
         started = time.monotonic()
         try:
             response = self.llm.generate(
@@ -234,9 +260,25 @@ class MultiAgentTripPlanner:
         return {"planner_response": response}
 
     def _validate_plan(self, state: TripGraphState) -> dict:
-        plan = self._parse_response(state["planner_response"], state["request"])
-        weather_data = state["weather_data"]
-        weather_source = state["weather_source"]
+        retry_count = state.get("retry_count", 0)
+        try:
+            plan = self._parse_response(state["planner_response"], state["request"])
+        except (ValueError, Exception) as exc:
+            error_msg = str(exc)
+            attempt = retry_count + 1
+            if retry_count >= MAX_PLAN_RETRIES:
+                print(f"❌ 校验失败 (第 {attempt} 次，已达上限): {error_msg}")
+                raise ValueError(
+                    f"行程规划经 {attempt} 次尝试仍无法生成有效计划: {error_msg}"
+                ) from exc
+            print(f"⚠️  校验失败 (第 {attempt} 次，将重试): {error_msg}")
+            return {
+                "retry_count": retry_count + 1,
+                "validation_error": error_msg,
+            }
+        # 校验通过
+        weather_data = state.get("weather_data", [])
+        weather_source = state.get("weather_source", "")
         plan.weather_info = weather_data
         if not weather_data:
             plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
@@ -245,7 +287,9 @@ class MultiAgentTripPlanner:
                 f" 天气来源：{weather_source}；Open-Meteo 的温度为当日最高/最低气温，"
                 "请在临行前复查。"
             )
-        return {"trip_plan": plan}
+        if retry_count > 0:
+            print(f"✅ 第 {retry_count + 1} 次尝试校验通过")
+        return {"trip_plan": plan, "validation_error": ""}
 
     def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
         """构建行程规划查询"""
@@ -328,6 +372,7 @@ class MultiAgentTripPlanner:
             from datetime import date, timedelta
             start = date.fromisoformat(request.start_date)
             for index, day in enumerate(trip_plan.days):
+                day.day_index = index  # LLM 可能返回 1-based，强制修正为 0-based
                 if day.date != (start + timedelta(days=index)).isoformat():
                     raise ValueError("计划中的每日日期不连续")
                 if not day.attractions or not {"breakfast", "lunch", "dinner"}.issubset(

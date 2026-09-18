@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_options
+from app.agents.trip_planner_agent import (
+    MultiAgentTripPlanner, planner_llm_options, MAX_PLAN_RETRIES, _should_retry,
+)
 from app.api.main import app as api_app
 from app.models.schemas import POIInfo, TripRequest, TripPlan, WeatherInfo
 from app.services.amap_service import AmapService, create_amap_tool
@@ -77,6 +79,170 @@ class TripModelTests(unittest.TestCase):
             result = planner.plan_trip(request())
 
         self.assertEqual(result, "已校验")
+
+    def test_validate_failure_retries_planner_up_to_twice(self):
+        """校验前两次失败后第三次成功，planner 被调用 3 次。"""
+        call_count = {"plan": 0, "validate": 0}
+        plan_responses = []
+
+        class FakeLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            def generate(self, system_prompt, user_prompt, **opts):
+                return "已整理"
+
+        valid_plan = json.dumps({
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "游览",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "attractions": [{"name": "故宫", "address": "北京",
+                    "location": {"longitude": 116.397, "latitude": 39.916},
+                    "visit_duration": 120, "description": "游览"}],
+                "meals": [{"type": t, "name": t} for t in ("breakfast", "lunch", "dinner")],
+            }],
+            "weather_info": [], "overall_suggestions": "建议",
+        }, ensure_ascii=False)
+
+        original_generate_plan = MultiAgentTripPlanner._generate_plan
+        original_validate_plan = MultiAgentTripPlanner._validate_plan
+
+        def tracking_generate(self_agent, state):
+            call_count["plan"] += 1
+            # First two calls return invalid JSON, third returns valid
+            if call_count["plan"] <= 2:
+                return {"planner_response": "无效的 JSON 响应"}
+            return {"planner_response": valid_plan}
+
+        def tracking_validate(self_agent, state):
+            call_count["validate"] += 1
+            return original_validate_plan(self_agent, state)
+
+        amap = unittest.mock.Mock()
+        amap.search_poi.return_value = [
+            POIInfo(id="1", name="故宫", type="景点", address="北京")
+        ]
+        amap.get_weather.side_effect = ValueError("UNKNOWN")
+
+        with patch.object(MultiAgentTripPlanner, "_generate_plan", tracking_generate), \
+             patch.object(MultiAgentTripPlanner, "_validate_plan", tracking_validate), \
+             patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError):
+            planner = MultiAgentTripPlanner(
+                llm=FakeLLM(),
+                amap_service=amap,
+            )
+            plan = planner.plan_trip(request(end_date="2026-10-01", travel_days=1))
+
+        self.assertEqual(call_count["plan"], 3)
+        self.assertEqual(call_count["validate"], 3)
+        self.assertIsInstance(plan, TripPlan)
+        self.assertEqual(plan.city, "北京")
+
+    def test_validate_failure_exceeds_max_retries_raises(self):
+        """校验始终失败，超过最大重试次数后抛出异常。"""
+        class FakeLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            def generate(self, system_prompt, user_prompt, **opts):
+                return "已整理"
+
+        def always_invalid(_self, state):
+            return {"planner_response": "这不是有效的 JSON"}
+
+        amap = unittest.mock.Mock()
+        amap.search_poi.return_value = [
+            POIInfo(id="1", name="故宫", type="景点", address="北京")
+        ]
+        amap.get_weather.side_effect = ValueError("UNKNOWN")
+
+        with patch.object(MultiAgentTripPlanner, "_generate_plan", always_invalid), \
+             patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError):
+            planner = MultiAgentTripPlanner(llm=FakeLLM(), amap_service=amap)
+            with self.assertRaisesRegex(ValueError, f"{MAX_PLAN_RETRIES + 1} 次尝试"):
+                planner.plan_trip(request(end_date="2026-10-01", travel_days=1))
+
+    def test_retry_includes_error_feedback_in_planner_prompt(self):
+        """重试时 planner 的 prompt 包含上次校验失败原因。"""
+        prompts_received = []
+
+        valid_plan = json.dumps({
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "游览",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "attractions": [{"name": "故宫", "address": "北京",
+                    "location": {"longitude": 116.397, "latitude": 39.916},
+                    "visit_duration": 120, "description": "游览"}],
+                "meals": [{"type": t, "name": t} for t in ("breakfast", "lunch", "dinner")],
+            }],
+            "weather_info": [], "overall_suggestions": "建议",
+        }, ensure_ascii=False)
+
+        class TrackingLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            planner_calls = 0
+            def generate(self, system_prompt, user_prompt, **opts):
+                prompts_received.append(user_prompt)
+                # Attraction/hotel summarization calls (run in parallel threads)
+                # Use unique role identifiers to avoid matching planner prompt
+                if "景点搜索专家" in system_prompt or "酒店推荐专家" in system_prompt:
+                    return "已整理"
+                # Planner calls (sequential, after fan-in)
+                self.planner_calls += 1
+                if self.planner_calls <= 1:
+                    return "不是JSON"
+                return valid_plan
+
+        amap = unittest.mock.Mock()
+        amap.search_poi.return_value = [
+            POIInfo(id="1", name="故宫", type="景点", address="北京")
+        ]
+        amap.get_weather.side_effect = ValueError("UNKNOWN")
+
+        with patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError):
+            planner = MultiAgentTripPlanner(llm=TrackingLLM(), amap_service=amap)
+            plan = planner.plan_trip(request(end_date="2026-10-01", travel_days=1))
+
+        # The retry prompt should contain the error from the first failed validation
+        planner_prompts = [p for p in prompts_received if "旅行计划" in p]
+        self.assertGreaterEqual(len(planner_prompts), 2)
+        self.assertIn("上次生成的计划未通过校验", planner_prompts[1])
+        self.assertIsInstance(plan, TripPlan)
+
+    def test_conditional_edge_routes_to_end_on_success(self):
+        """校验通过时条件路由函数返回 END。"""
+        from langgraph.graph import END
+        self.assertEqual(_should_retry({"trip_plan": TripPlan(
+            city="北京", start_date="2026-10-01", end_date="2026-10-01",
+            days=[], overall_suggestions="测试",
+        )}), END)
+        # 校验失败且重试次数未超限时应返回 "planner"
+        self.assertEqual(_should_retry({"retry_count": 1}), "planner")
+        # 校验失败且重试次数已超限时应返回 END
+        self.assertEqual(_should_retry({"retry_count": MAX_PLAN_RETRIES + 1}), END)
+
+    def test_weather_skips_llm_when_unavailable(self):
+        """天气不可用时不调用 LLM generate。"""
+        llm = unittest.mock.Mock()
+        llm.provider = "other"
+        llm.model = "test"
+        amap = unittest.mock.Mock()
+
+        agent = MultiAgentTripPlanner.__new__(MultiAgentTripPlanner)
+        agent.llm = llm
+        agent.amap_service = amap
+
+        # 直接 patch get_trip_forecast 抛异常，测试 except 分支跳过 LLM
+        with patch("app.agents.trip_planner_agent.get_trip_forecast", side_effect=ValueError("测试错误")):
+            result = agent._get_weather({"request": request(end_date="2026-10-01", travel_days=1)})
+
+        self.assertEqual(result["weather_data"], [])
+        self.assertIn("天气查询不可用", result["weather_response"])
+        llm.generate.assert_not_called()
 
     def test_qwen_planner_disables_default_thinking(self):
         qwen = unittest.mock.Mock(provider="qwen", model="qwen3.8-flash", timeout=60)
