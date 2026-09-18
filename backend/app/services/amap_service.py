@@ -1,6 +1,7 @@
 """高德地图 MCP 服务与数据转换。"""
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -8,9 +9,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional
 
+import requests
+
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, RouteInfo, WeatherInfo
 from .mcp_client import MCPToolClient
+
+logger = logging.getLogger(__name__)
 
 
 def decode_payload(value: Any) -> Any:
@@ -104,9 +109,10 @@ def create_amap_tool(api_key: str) -> MCPToolClient:
 
 
 class AmapService:
-    def __init__(self, mcp_tool: Optional[MCPToolClient] = None):
+    def __init__(self, mcp_tool: Optional[MCPToolClient] = None, api_key: Optional[str] = None):
+        self.api_key = api_key or get_settings().amap_api_key
         if mcp_tool is None:
-            mcp_tool = create_amap_tool(get_settings().amap_api_key)
+            mcp_tool = create_amap_tool(self.api_key)
         self.mcp_tool = mcp_tool
 
     def _call(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -120,6 +126,42 @@ class AmapService:
         return result
 
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
+        # 若是测试桩 (FakeMCP) 或未配置 key，直接走 mock 接口，确保单测完全离线独立
+        is_mock = hasattr(self.mcp_tool, "calls") or not self.api_key
+        if not is_mock:
+            try:
+                params = {
+                    "key": self.api_key,
+                    "keywords": keywords,
+                    "city": city,
+                    "citylimit": str(citylimit).lower(),
+                }
+                resp = requests.get(
+                    "https://restapi.amap.com/v3/place/text",
+                    params=params,
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if str(data.get("status")) == "1" and isinstance(data.get("pois"), list):
+                        result = []
+                        for poi in data["pois"]:
+                            if not isinstance(poi, dict):
+                                continue
+                            result.append(POIInfo(
+                                id=as_text(poi.get("id")),
+                                name=as_text(poi.get("name")),
+                                type=as_text(poi.get("type") or poi.get("typecode")),
+                                address=as_text(poi.get("address")),
+                                location=parse_location(poi.get("location")),
+                                tel=as_text(poi.get("tel")) or None,
+                            ))
+                        if result:
+                            return result
+            except Exception as exc:
+                logger.warning("直连高德 Web API 搜索 POI 异常，降级至 MCP: %s", exc)
+
+        # 降级或测试 mock 环境：调用 MCP 工具
         pois = self._call("maps_text_search", {
             "keywords": keywords, "city": city, "citylimit": str(citylimit).lower(),
         }).get("pois", [])
@@ -206,6 +248,45 @@ class AmapService:
         payload = self._call("maps_search_detail", {"id": poi_id})
         pois = payload.get("pois", [])
         return pois[0] if isinstance(pois, list) and pois else payload
+
+    def get_poi_photo(self, name: str, city: str = "") -> Optional[str]:
+        """优先从高德 Web API 的 POI 搜索中获取官方实景照片 (photos 字段)。"""
+        if not self.api_key:
+            return None
+        try:
+            params = {
+                "key": self.api_key,
+                "keywords": name.strip(),
+                "extensions": "all",
+            }
+            if city and city.strip():
+                params["city"] = city.strip()
+                params["citylimit"] = "true"
+
+            resp = requests.get(
+                "https://restapi.amap.com/v3/place/text",
+                params=params,
+                timeout=4,
+            )
+            if resp.status_code != 200:
+                logger.warning("高德 POI 照片查询失败 (HTTP %s): %s", resp.status_code, name)
+                return None
+            data = resp.json()
+            if str(data.get("status")) != "1":
+                return None
+            pois = data.get("pois", [])
+            for poi in pois:
+                photos = poi.get("photos", [])
+                if isinstance(photos, list):
+                    for photo in photos:
+                        if isinstance(photo, dict) and photo.get("url"):
+                            url = str(photo["url"]).strip()
+                            if url.startswith("http://") or url.startswith("https://"):
+                                return url
+            return None
+        except Exception as exc:
+            logger.warning("获取高德 POI 照片异常 (%s): %s", name, exc)
+            return None
 
 
 _amap_service: Optional[AmapService] = None

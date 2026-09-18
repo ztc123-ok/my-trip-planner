@@ -1,15 +1,19 @@
+# -*- coding: utf-8 -*-
 """LangGraph 多角色旅行规划工作流。"""
 
 import json
+import math
 import time
-from typing import TypedDict, Literal
+import uuid
+from typing import TypedDict, Literal, Optional
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
 from ..services.weather_service import get_trip_forecast
-from ..models.schemas import TripRequest, TripPlan, WeatherInfo
+from ..models.schemas import TripRequest, TripPlan, WeatherInfo, POIInfo, Location
 from ..config import get_settings
 
 # ============ Agent提示词 ============
@@ -113,8 +117,51 @@ def planner_llm_options(llm) -> dict:
     return {}
 
 
+def calculate_distance_km(loc1: Location, loc2: Location) -> float:
+    """计算两经纬度之间的地表大圆距离 (公里)。"""
+    lat1, lon1 = math.radians(loc1.latitude), math.radians(loc1.longitude)
+    lat2, lon2 = math.radians(loc2.latitude), math.radians(loc2.longitude)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return 6371.0 * c
+
+
+def format_nearest_attraction_distance(hotel_loc: Optional[Location], attractions: list[POIInfo]) -> Optional[str]:
+    """计算酒店到候选景点中最近的一个，并格式化为精炼标签。例如 '近天安门(800m)' 或 '距故宫 1.8km'。"""
+    if not hotel_loc or not attractions:
+        return None
+    nearest_name = None
+    min_dist = float("inf")
+    for att in attractions:
+        if att.location:
+            dist = calculate_distance_km(hotel_loc, att.location)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_name = att.name
+
+    if not nearest_name or min_dist == float("inf"):
+        return None
+
+    # 精简景点名称（去除层级或括号说明）
+    short_name = nearest_name.split("-")[0].split("·")[0].split("(")[0].split("（")[0].strip()
+
+    if min_dist < 1.0:
+        meters = int(round(min_dist * 1000, -1))
+        if meters < 50:
+            meters = 50
+        return f"近{short_name}({meters}m)"
+    return f"距{short_name} {min_dist:.1f}km"
+
+
 class TripGraphState(TypedDict, total=False):
     request: TripRequest
+    candidate_attractions: list[POIInfo]  # 并行搜索到的真实候选景点列表
+    candidate_hotels: list[POIInfo]        # 并行搜索到的真实候选酒店列表
+    selected_attractions: list[str]        # 用户人工挑选/确认的景点名称列表
+    selected_hotel: str                    # 用户选定的酒店名称
+    user_feedback: str                     # 用户在中断确认时提供的修改/干预意见
     attraction_response: str
     weather_data: list[WeatherInfo]
     weather_source: str
@@ -141,17 +188,19 @@ def _should_retry(state: TripGraphState) -> Literal["planner", "__end__"]:
 
 
 class MultiAgentTripPlanner:
-    """Four specialist LangGraph nodes with a validated TripPlan output."""
+    """Four specialist LangGraph nodes with validated TripPlan output and HITL support."""
 
     agent_names = ("景点搜索专家", "天气查询专家", "酒店推荐专家", "行程规划专家")
 
-    def __init__(self, llm=None, amap_service: AmapService | None = None):
+    def __init__(self, llm=None, amap_service: AmapService | None = None, checkpointer=None):
         settings = get_settings()
         self.llm = llm if llm is not None else get_llm()
         self.amap_service = (
             amap_service if amap_service is not None
             else AmapService(mcp_tool=create_amap_tool(settings.amap_api_key))
         )
+        self.checkpointer = checkpointer if checkpointer is not None else MemorySaver()
+
         builder = StateGraph(TripGraphState)
         builder.add_node("attractions", self._search_attractions)
         builder.add_node("weather", self._get_weather)
@@ -163,13 +212,88 @@ class MultiAgentTripPlanner:
         builder.add_edge(["attractions", "weather", "hotels"], "planner")
         builder.add_edge("planner", "validate")
         builder.add_conditional_edges("validate", _should_retry)
+
+        # 基础图：无中断，用于一键式调用及既有兼容
         self.graph = builder.compile()
 
+        # Human-in-the-Loop 图：在 planner 节点前设置中断点，保存状态检查点
+        self.graph_hitl = builder.compile(
+            checkpointer=self.checkpointer,
+            interrupt_before=["planner"]
+        )
+
     def plan_trip(self, request: TripRequest) -> TripPlan:
+        """一键全自动生成旅行计划（无中断模式）。"""
         print(f"🚀 LangGraph 开始规划 {request.city} 的 {request.travel_days} 天行程")
         result = self.graph.invoke({"request": request})
         print("✅ LangGraph 旅行计划生成完成")
         return result["trip_plan"]
+
+    def prepare_trip_plan(self, request: TripRequest, thread_id: str | None = None) -> dict:
+        """HITL 阶段一：并行搜索并在 planner 节点前挂起，返回候选数据供用户确认。"""
+        tid = thread_id or f"trip_{uuid.uuid4().hex[:12]}"
+        config = {"configurable": {"thread_id": tid}}
+        print(f"🚀 LangGraph HITL 开始准备 {request.city} 的行程 (thread_id={tid})")
+        self.graph_hitl.invoke({"request": request}, config=config)
+        state = self.graph_hitl.get_state(config)
+        values = state.values
+        print(f"⏸️ LangGraph HITL 在 planner 前挂起，等待用户确认候选 POI (next={state.next})")
+        candidate_attractions = values.get("candidate_attractions", [])
+        raw_hotels = values.get("candidate_hotels", [])
+        enriched_hotels = []
+        for h in raw_hotels:
+            dist_desc = format_nearest_attraction_distance(h.location, candidate_attractions)
+            if dist_desc:
+                enriched_hotels.append(h.model_copy(update={"distance": dist_desc}))
+            else:
+                enriched_hotels.append(h)
+
+        return {
+            "thread_id": tid,
+            "city": request.city,
+            "travel_days": request.travel_days,
+            "candidate_attractions": candidate_attractions,
+            "candidate_hotels": enriched_hotels,
+            "weather_info": values.get("weather_data", []),
+        }
+
+    def resume_trip_plan(
+        self,
+        thread_id: str,
+        selected_attractions: list[str] | None = None,
+        selected_hotel: str | None = None,
+        user_feedback: str | None = None,
+    ) -> TripPlan:
+        """HITL 阶段二：接收用户确认与反馈，更新状态后恢复图执行直至生成有效计划。"""
+        config = {"configurable": {"thread_id": thread_id}}
+        state = self.graph_hitl.get_state(config)
+        if not state or not state.next:
+            if state and state.values.get("trip_plan"):
+                return state.values["trip_plan"]
+            raise ValueError(f"会话 {thread_id} 未找到或未处于待继续状态")
+
+        updates = {}
+        if selected_attractions is not None:
+            updates["selected_attractions"] = selected_attractions
+        if selected_hotel is not None:
+            updates["selected_hotel"] = selected_hotel
+        if user_feedback is not None:
+            updates["user_feedback"] = user_feedback
+
+        if updates:
+            # 标记为前驱节点写入，保证后续正常执行待处理节点 planner
+            self.graph_hitl.update_state(config, updates, as_node="hotels")
+
+        print(f"▶️ LangGraph HITL 恢复执行 planner 与 validate (thread_id={thread_id})")
+        result = self.graph_hitl.invoke(None, config=config)
+        plan = result.get("trip_plan") if isinstance(result, dict) else None
+        if not plan:
+            plan = self.graph_hitl.get_state(config).values.get("trip_plan")
+        if not plan:
+            raise ValueError(f"会话 {thread_id} 恢复规划后未生成有效旅行计划")
+        print("✅ LangGraph HITL 旅行计划生成完成")
+        return plan
+
 
     def _search_attractions(self, state: TripGraphState) -> dict:
         request = state["request"]
@@ -183,7 +307,10 @@ class MultiAgentTripPlanner:
             ATTRACTION_AGENT_PROMPT,
             f"城市：{request.city}；偏好：{', '.join(request.preferences) or '无'}。已检索景点：{verified}",
         )
-        return {"attraction_response": f"高德地图真实景点：{verified}\n专家整理：{summary}"}
+        return {
+            "candidate_attractions": pois,
+            "attraction_response": f"高德地图真实景点：{verified}\n专家整理：{summary}",
+        }
 
     def _get_weather(self, state: TripGraphState) -> dict:
         request = state["request"]
@@ -219,18 +346,54 @@ class MultiAgentTripPlanner:
             "weather_response": weather_response,
         }
 
+    @staticmethod
+    def _infer_hotel_meta(name: str, accommodation: str = "") -> tuple[str, str, str]:
+        """根据酒店名称与住宿偏好推断参考价格区间、综合评分和特色标签"""
+        n = name.lower()
+        if any(w in n for w in ("青年旅舍", "青年旅社", "青旅", "胶囊", "客栈", "青舍", "民宿", "太空舱")):
+            return ("¥90~180/晚", "4.6", "青旅民宿")
+        if any(w in n for w in ("国际", "万豪", "希尔顿", "洲际", "凯宾斯基", "香格里拉", "喜来登", "威斯汀", "豪华", "五星", "丽思")):
+            return ("¥800~1500/晚", "4.8", "豪华高档")
+        if any(w in n for w in ("快捷", "如家", "汉庭", "锦江之星", "7天", "格林豪泰", "宜必思", "速8", "轻居", "驿站", "住小叮")):
+            return ("¥180~280/晚", "4.5", "经济快捷")
+        if any(w in n for w in ("度假", "温泉", "庄园", "会馆", "花园")):
+            return ("¥600~1000/晚", "4.7", "休闲度假")
+
+        # 结合用户提交的住宿偏好兜底
+        acc = accommodation or ""
+        if "经济" in acc or "青年" in acc or "背包" in acc:
+            return ("¥180~280/晚", "4.5", "经济优选")
+        if "高档" in acc or "豪华" in acc or "五星" in acc:
+            return ("¥800~1400/晚", "4.8", "高档优选")
+        return ("¥320~500/晚", "4.6", "品质舒适")
+
     def _search_hotels(self, state: TripGraphState) -> dict:
         request = state["request"]
         print("🏨 并行查询: 搜索酒店...")
         pois = self.amap_service.search_poi("酒店", request.city)
         if not pois:
             raise ValueError(f"高德地图未找到 {request.city} 的酒店")
-        verified = json.dumps([poi.model_dump(mode="json") for poi in pois], ensure_ascii=False)
+        
+        # 丰富候选酒店的决策元数据（价格、评分、标签）供 HITL 确认与展示
+        enriched_pois = []
+        for poi in pois:
+            price_range, rating, tag = self._infer_hotel_meta(poi.name, request.accommodation)
+            enriched_poi = poi.model_copy(update={
+                "price_range": price_range,
+                "rating": rating,
+                "tag": tag,
+            })
+            enriched_pois.append(enriched_poi)
+
+        verified = json.dumps([poi.model_dump(mode="json") for poi in enriched_pois], ensure_ascii=False)
         summary = self.llm.generate(
             HOTEL_AGENT_PROMPT,
             f"城市：{request.city}；住宿偏好：{request.accommodation}。已检索酒店：{verified}",
         )
-        return {"hotel_response": f"高德地图真实酒店：{verified}\n专家整理：{summary}"}
+        return {
+            "candidate_hotels": enriched_pois,
+            "hotel_response": f"高德地图真实酒店：{verified}\n专家整理：{summary}",
+        }
 
     def _generate_plan(self, state: TripGraphState) -> dict:
         request = state["request"]
@@ -246,7 +409,13 @@ class MultiAgentTripPlanner:
             if weather_data else state.get("weather_response", "天气不可用")
         )
         query = self._build_planner_query(
-            request, state["attraction_response"], verified_weather, state["hotel_response"]
+            request,
+            state["attraction_response"],
+            verified_weather,
+            state["hotel_response"],
+            selected_attractions=state.get("selected_attractions"),
+            selected_hotel=state.get("selected_hotel"),
+            user_feedback=state.get("user_feedback"),
         )
         if validation_error:
             query += f"\n\n**上次生成的计划未通过校验，请修正以下问题:** {validation_error}"
@@ -291,7 +460,16 @@ class MultiAgentTripPlanner:
             print(f"✅ 第 {retry_count + 1} 次尝试校验通过")
         return {"trip_plan": plan, "validation_error": ""}
 
-    def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
+    def _build_planner_query(
+        self,
+        request: TripRequest,
+        attractions: str,
+        weather: str,
+        hotels: str = "",
+        selected_attractions: list[str] | None = None,
+        selected_hotel: str | None = None,
+        user_feedback: str | None = None,
+    ) -> str:
         """构建行程规划查询"""
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
 
@@ -311,21 +489,28 @@ class MultiAgentTripPlanner:
 
 **酒店信息:**
 {hotels}
+"""
+        if selected_attractions:
+            query += f"\n**用户已明确确认的心仪景点 (请务必优先安排以下景点):** {', '.join(selected_attractions)}\n"
+        if selected_hotel:
+            query += f"\n**用户已明确选定的酒店 (请在行程中推荐此酒店):** {selected_hotel}\n"
+        if user_feedback:
+            query += f"\n**用户人工调整要求:** {user_feedback}\n"
+        if request.free_text_input:
+            query += f"\n**额外要求:** {request.free_text_input}\n"
 
+        query += """
 **要求:**
 1. 每天安排2-3个景点
 2. 每天必须包含早中晚三餐
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
-3. 考虑景点之间的距离和交通方式
-4. 返回完整的JSON格式数据
-5. 景点的经纬度坐标要真实准确
-6. weather_info只能使用上文真实天气数据，若不可用则返回空数组
+4. 考虑景点之间的距离和交通方式
+5. 返回完整的JSON格式数据
+6. 景点的经纬度坐标要真实准确
+7. weather_info只能使用上文真实天气数据，若不可用则返回空数组
 """
-        if request.free_text_input:
-            query += f"\n**额外要求:** {request.free_text_input}"
-
         return query
-    
+
     def _parse_response(self, response: str, request: TripRequest) -> TripPlan:
         """
         解析Agent响应
@@ -385,7 +570,8 @@ class MultiAgentTripPlanner:
         except Exception as e:
             print(f"⚠️  解析响应失败: {str(e)}")
             raise ValueError("行程规划 Agent 未返回有效的旅行计划 JSON") from e
-    
+
+
 # 全局多智能体系统实例
 _multi_agent_planner = None
 

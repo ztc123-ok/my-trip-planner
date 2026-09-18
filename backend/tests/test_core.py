@@ -10,11 +10,15 @@ from unittest.mock import patch
 
 from app.agents.trip_planner_agent import (
     MultiAgentTripPlanner, planner_llm_options, MAX_PLAN_RETRIES, _should_retry,
+    calculate_distance_km, format_nearest_attraction_distance,
 )
 from app.api.main import app as api_app
-from app.models.schemas import POIInfo, TripRequest, TripPlan, WeatherInfo
+from app.models.schemas import POIInfo, TripRequest, TripPlan, WeatherInfo, Location
 from app.services.amap_service import AmapService, create_amap_tool
 from app.services.ddgs_photo_service import DDGSPhotoService
+from app.services.photo_service import (
+    UnifiedPhotoService, get_photo_service, extract_parent_attraction,
+)
 from app.services.weather_service import (
     get_open_meteo_forecast, get_trip_forecast,
 )
@@ -512,7 +516,7 @@ class DDGSPhotoServiceTests(unittest.TestCase):
         service = unittest.mock.Mock()
         service.get_photo_url.return_value = None
         with patch("app.api.main.validate_config"), patch(
-            "app.api.routes.poi.get_ddgs_photo_service", return_value=service
+            "app.api.routes.poi.get_photo_service", return_value=service
         ), TestClient(api_app) as client:
             response = client.get("/api/poi/photo", params={"name": "西湖", "city": "杭州"})
         self.assertEqual(response.status_code, 200)
@@ -529,6 +533,119 @@ class DDGSPhotoServiceTests(unittest.TestCase):
             DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖"),
             "https://example.com/west-lake-thumb.jpg",
         )
+
+    def test_amap_service_get_poi_photo_extracts_first_photo(self):
+        mock_response = unittest.mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "1",
+            "pois": [{
+                "id": "B000A83M61",
+                "name": "故宫博物院",
+                "photos": [
+                    {"url": "https://store.is.autonavi.com/showpic/photo1.jpg"},
+                    {"url": "https://store.is.autonavi.com/showpic/photo2.jpg"},
+                ]
+            }]
+        }
+        service = AmapService(mcp_tool=FakeMCP({}), api_key="fake_key")
+        with patch("requests.get", return_value=mock_response) as mock_get:
+            photo = service.get_poi_photo("故宫博物院", "北京")
+            self.assertEqual(photo, "https://store.is.autonavi.com/showpic/photo1.jpg")
+            mock_get.assert_called_once()
+            args, kwargs = mock_get.call_args
+            self.assertEqual(kwargs["params"]["keywords"], "故宫博物院")
+            self.assertEqual(kwargs["params"]["extensions"], "all")
+
+    def test_unified_photo_service_prefers_amap_poi_photo(self):
+        fake_amap = unittest.mock.Mock()
+        fake_amap.get_poi_photo.return_value = "https://store.is.autonavi.com/showpic/amap_photo.jpg"
+        fake_ddgs = unittest.mock.Mock()
+
+        svc = UnifiedPhotoService(amap_service=fake_amap, ddgs_service=fake_ddgs)
+        result = svc.get_photo_url("西湖", "杭州")
+
+        self.assertEqual(result, "https://store.is.autonavi.com/showpic/amap_photo.jpg")
+        fake_amap.get_poi_photo.assert_called_once_with(name="西湖", city="杭州")
+        fake_ddgs.get_photo_url.assert_not_called()
+
+    def test_unified_photo_service_falls_back_to_bing_when_amap_has_no_photo(self):
+        fake_amap = unittest.mock.Mock()
+        fake_amap.get_poi_photo.return_value = None
+        fake_ddgs = unittest.mock.Mock()
+        fake_ddgs.get_photo_url.return_value = "https://bing.com/images/bing_photo.jpg"
+
+        svc = UnifiedPhotoService(amap_service=fake_amap, ddgs_service=fake_ddgs)
+        result = svc.get_photo_url("特色胡同", "北京")
+
+        self.assertEqual(result, "https://bing.com/images/bing_photo.jpg")
+        fake_amap.get_poi_photo.assert_called_once_with(name="特色胡同", city="北京")
+        fake_ddgs.get_photo_url.assert_called_once_with(name="特色胡同", city="北京")
+
+    def test_unified_photo_service_returns_none_when_both_fail(self):
+        fake_amap = unittest.mock.Mock()
+        fake_amap.get_poi_photo.side_effect = Exception("Amap timeout")
+        fake_ddgs = unittest.mock.Mock()
+        fake_ddgs.get_photo_url.return_value = None
+
+        svc = UnifiedPhotoService(amap_service=fake_amap, ddgs_service=fake_ddgs)
+        result = svc.get_photo_url("未知小众景点", "某地")
+
+        self.assertIsNone(result)
+
+    def test_extract_parent_attraction_rules(self):
+        self.assertEqual(extract_parent_attraction("玉渊潭公园-留春园"), "玉渊潭公园")
+        self.assertEqual(extract_parent_attraction("故宫博物院-堆秀山"), "故宫博物院")
+        self.assertEqual(extract_parent_attraction("什刹海-前海"), "什刹海")
+        self.assertEqual(extract_parent_attraction("北海公园(荷花湖)"), "北海公园")
+        self.assertEqual(extract_parent_attraction("太庙-神柏"), "太庙")
+        self.assertIsNone(extract_parent_attraction("白袍将军"))
+        self.assertIsNone(extract_parent_attraction("西湖"))
+        self.assertIsNone(extract_parent_attraction(""))
+
+    def test_unified_photo_service_parent_fallback_to_amap(self):
+        fake_amap = unittest.mock.Mock()
+        # 原名查询无图，母体查询命中
+        def amap_side_effect(name, city):
+            if name == "玉渊潭公园-留春园":
+                return None
+            if name == "玉渊潭公园":
+                return "https://store.is.autonavi.com/showpic/yuyuantan.jpg"
+            return None
+        fake_amap.get_poi_photo.side_effect = amap_side_effect
+
+        fake_ddgs = unittest.mock.Mock()
+        fake_ddgs.get_photo_url.return_value = None
+
+        svc = UnifiedPhotoService(amap_service=fake_amap, ddgs_service=fake_ddgs)
+        result = svc.get_photo_url("玉渊潭公园-留春园", "北京")
+
+        self.assertEqual(result, "https://store.is.autonavi.com/showpic/yuyuantan.jpg")
+        self.assertEqual(fake_amap.get_poi_photo.call_count, 2)
+        fake_amap.get_poi_photo.assert_any_call(name="玉渊潭公园-留春园", city="北京")
+        fake_amap.get_poi_photo.assert_any_call(name="玉渊潭公园", city="北京")
+
+    def test_unified_photo_service_parent_fallback_to_bing(self):
+        fake_amap = unittest.mock.Mock()
+        fake_amap.get_poi_photo.return_value = None
+
+        fake_ddgs = unittest.mock.Mock()
+        # 原名查询无图，母体查询命中
+        def ddgs_side_effect(name, city):
+            if name == "西海湿地公园-景观平台":
+                return None
+            if name == "西海湿地公园":
+                return "https://bing.com/images/xihai.jpg"
+            return None
+        fake_ddgs.get_photo_url.side_effect = ddgs_side_effect
+
+        svc = UnifiedPhotoService(amap_service=fake_amap, ddgs_service=fake_ddgs)
+        result = svc.get_photo_url("西海湿地公园-景观平台", "北京")
+
+        self.assertEqual(result, "https://bing.com/images/xihai.jpg")
+        self.assertEqual(fake_ddgs.get_photo_url.call_count, 2)
+        fake_ddgs.get_photo_url.assert_any_call(name="西海湿地公园-景观平台", city="北京")
+        fake_ddgs.get_photo_url.assert_any_call(name="西海湿地公园", city="北京")
 
 
 class ApiTests(unittest.TestCase):
@@ -548,7 +665,7 @@ class ApiTests(unittest.TestCase):
         service = unittest.mock.Mock()
         service.get_photo_url.return_value = "https://example.com/west-lake.jpg"
         with patch("app.api.main.validate_config"), patch(
-            "app.api.routes.poi.get_ddgs_photo_service", return_value=service
+            "app.api.routes.poi.get_photo_service", return_value=service
         ), TestClient(api_app) as client:
             response = client.get("/api/poi/photo", params={"name": "西湖", "city": "杭州"})
         self.assertEqual(response.status_code, 200)
@@ -573,6 +690,186 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["success"])
         self.assertEqual(response.json()["data"]["city"], "北京")
+
+
+    def test_hitl_prepare_interrupts_before_planner_and_saves_candidates(self):
+        """HITL 阶段一：在 planner 节点前挂起，并返回候选景点、酒店和天气。"""
+        fake_attractions = [POIInfo(id="p1", name="天安门", type="风景名胜", address="北京")]
+        fake_hotels = [POIInfo(id="h1", name="北京饭店", type="商务出行", address="王府井")]
+
+        class FakeSearchLLM:
+            def generate(self, system_prompt, user_prompt, **opts):
+                return '模拟搜索整理'
+
+        planner = MultiAgentTripPlanner(llm=FakeSearchLLM(), amap_service=AmapService(mcp_tool=FakeMCP({})))
+        with patch.object(planner.amap_service, "search_poi", side_effect=[fake_attractions, fake_hotels]), \
+             patch("app.agents.trip_planner_agent.get_trip_forecast", return_value=([], "")):
+            result = planner.prepare_trip_plan(request(city="北京"))
+
+        self.assertTrue(result["thread_id"].startswith("trip_"))
+        self.assertEqual(result["city"], "北京")
+        self.assertEqual(len(result["candidate_attractions"]), 1)
+        self.assertEqual(result["candidate_attractions"][0].name, "天安门")
+        self.assertEqual(len(result["candidate_hotels"]), 1)
+        self.assertEqual(result["candidate_hotels"][0].name, "北京饭店")
+
+        # 检查图确实在 planner 前挂起
+        state = planner.graph_hitl.get_state({"configurable": {"thread_id": result["thread_id"]}})
+        self.assertEqual(state.next, ("planner",))
+
+    def test_hitl_resume_updates_user_choices_and_completes_plan(self):
+        """HITL 阶段二：接收用户确认的景点和建议，在 planner query 中生效并生成最终计划。"""
+        fake_attractions = [POIInfo(id="p1", name="天安门", type="风景名胜", address="北京")]
+        fake_hotels = [POIInfo(id="h1", name="北京饭店", type="商务出行", address="王府井")]
+
+        captured_queries = []
+        valid_plan = json.dumps({
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "游览",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "hotel": {"name": "北京饭店", "address": "王府井", "location": {"longitude": 116.4, "latitude": 39.9}, "price_range": "500", "rating": "4.8", "distance": "1km", "type": "高档", "estimated_cost": 600},
+                "attractions": [{"name": "天安门", "address": "北京", "location": {"longitude": 116.4, "latitude": 39.9}, "visit_duration": 60, "description": "广场", "category": "景点", "ticket_price": 0}],
+                "meals": [
+                    {"type": "breakfast", "name": "早点", "description": "豆浆油条", "estimated_cost": 20},
+                    {"type": "lunch", "name": "炸酱面", "description": "老北京炸酱面", "estimated_cost": 40},
+                    {"type": "dinner", "name": "烤鸭", "description": "全聚德烤鸭", "estimated_cost": 150}
+                ]
+            }],
+            "weather_info": [],
+            "overall_suggestions": "祝旅途愉快",
+            "budget": {"total_attractions": 0, "total_hotels": 600, "total_meals": 210, "total_transportation": 50, "total": 860}
+        })
+
+        class FakeLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            def generate(self, system_prompt, user_prompt, **opts):
+                captured_queries.append(user_prompt)
+                return valid_plan
+
+        planner = MultiAgentTripPlanner(llm=FakeLLM(), amap_service=AmapService(mcp_tool=FakeMCP({})))
+        with patch.object(planner.amap_service, "search_poi", side_effect=[fake_attractions, fake_hotels]), \
+             patch("app.agents.trip_planner_agent.get_trip_forecast", return_value=([], "")):
+            prep = planner.prepare_trip_plan(request(city="北京", travel_days=1, end_date="2026-10-01"))
+
+        # 阶段二恢复执行
+        thread_id = prep["thread_id"]
+        plan = planner.resume_trip_plan(
+            thread_id=thread_id,
+            selected_attractions=["天安门"],
+            selected_hotel="北京饭店",
+            user_feedback="希望早上去看升旗",
+        )
+
+        self.assertEqual(plan.city, "北京")
+        self.assertEqual(len(captured_queries), 3)
+        planner_query = captured_queries[-1]
+        self.assertIn("天安门", planner_query)
+        self.assertIn("北京饭店", planner_query)
+        self.assertIn("希望早上去看升旗", planner_query)
+
+
+    def test_hitl_prepare_and_confirm_endpoints(self):
+        """测试 /api/trip/plan/prepare 和 /api/trip/plan/confirm 端点"""
+        class FakeHITLAgent:
+            def prepare_trip_plan(self, req):
+                return {
+                    "thread_id": "test_thread_123",
+                    "city": req.city,
+                    "travel_days": req.travel_days,
+                    "candidate_attractions": [{"id": "1", "name": "故宫", "type": "景点", "address": "北京"}],
+                    "candidate_hotels": [{"id": "2", "name": "北京饭店", "type": "酒店", "address": "北京"}],
+                    "weather_info": [],
+                }
+
+            def resume_trip_plan(self, thread_id, selected_attractions=None, selected_hotel=None, user_feedback=None):
+                return TripPlan(
+                    city="北京",
+                    start_date="2026-10-01",
+                    end_date="2026-10-02",
+                    days=[],
+                    overall_suggestions=f"已选景点: {selected_attractions}, 反馈: {user_feedback}",
+                )
+
+        with patch("app.api.main.validate_config"), patch(
+            "app.api.routes.trip.get_trip_planner_agent", return_value=FakeHITLAgent()
+        ), TestClient(api_app) as client:
+            # 1. prepare
+            res1 = client.post("/api/trip/plan/prepare", json=request().model_dump())
+            self.assertEqual(res1.status_code, 200)
+            data1 = res1.json()["data"]
+            self.assertEqual(data1["thread_id"], "test_thread_123")
+            self.assertEqual(data1["candidate_attractions"][0]["name"], "故宫")
+
+            # 2. confirm
+            res2 = client.post("/api/trip/plan/confirm", json={
+                "thread_id": "test_thread_123",
+                "selected_attractions": ["故宫"],
+                "selected_hotel": "北京饭店",
+                "user_feedback": "优先上午游览故宫",
+            })
+            self.assertEqual(res2.status_code, 200)
+            self.assertTrue(res2.json()["success"])
+            self.assertIn("故宫", res2.json()["data"]["overall_suggestions"])
+
+
+    def test_hotel_meta_inference_and_candidate_enrichment(self):
+        """测试候选酒店决策元数据推断与丰富"""
+        p1, r1, t1 = MultiAgentTripPlanner._infer_hotel_meta("北京北平国际青年旅舍", "经济型酒店")
+        self.assertEqual(t1, "青旅民宿")
+        self.assertIn("¥90", p1)
+
+        p2, r2, t2 = MultiAgentTripPlanner._infer_hotel_meta("北京希尔顿酒店", "高档酒店")
+        self.assertEqual(t2, "豪华高档")
+        self.assertIn("¥800", p2)
+
+        p3, r3, t3 = MultiAgentTripPlanner._infer_hotel_meta("如家快捷酒店(王府井店)", "经济型酒店")
+        self.assertEqual(t3, "经济快捷")
+        self.assertIn("¥180", p3)
+
+        p4, r4, t4 = MultiAgentTripPlanner._infer_hotel_meta("普通商旅宾馆", "高档/豪华型酒店")
+        self.assertEqual(t4, "高档优选")
+        self.assertIn("¥800", p4)
+
+    def test_nearest_attraction_distance_calculation(self):
+        """测试酒店与候选景点的最近距离计算与标签生成"""
+        loc_tiananmen = Location(longitude=116.397, latitude=39.908)
+        loc_gugong = Location(longitude=116.397, latitude=39.918)
+        
+        # 验证距离计算合理性
+        dist = calculate_distance_km(loc_tiananmen, loc_gugong)
+        self.assertTrue(1.0 <= dist <= 1.3)
+
+        attractions = [
+            POIInfo(id="1", name="天安门广场", type="景点", address="北京", location=loc_tiananmen),
+            POIInfo(id="2", name="故宫博物院", type="景点", address="北京", location=loc_gugong),
+        ]
+
+        # 酒店距离天安门极近 (约 200m)
+        hotel_near_tiananmen = Location(longitude=116.397, latitude=39.906)
+        label1 = format_nearest_attraction_distance(hotel_near_tiananmen, attractions)
+        self.assertIn("近天安门", label1)
+        self.assertIn("m)", label1)
+
+        # 酒店离天安门约 2km
+        hotel_far = Location(longitude=116.397, latitude=39.890)
+        label2 = format_nearest_attraction_distance(hotel_far, attractions)
+        self.assertIn("距天安门", label2)
+        self.assertIn("km", label2)
+
+        # 长景点名称保留完整语义，不再出现 '..' 截断
+        attractions_long = [
+            POIInfo(id="3", name="中国国家博物馆", type="景点", address="北京", location=loc_tiananmen),
+        ]
+        label3 = format_nearest_attraction_distance(hotel_far, attractions_long)
+        self.assertEqual(label3, "距中国国家博物馆 2.0km")
+        self.assertNotIn("..", label3)
+
+        # 缺少坐标兜底
+        self.assertIsNone(format_nearest_attraction_distance(None, attractions))
+        self.assertIsNone(format_nearest_attraction_distance(hotel_near_tiananmen, []))
 
 
 if __name__ == "__main__":

@@ -93,21 +93,33 @@ class DDGSPhotoService:
         return None
 
     def get_photo_url(self, name: str, city: str = "") -> Optional[str]:
-        query = " ".join(part for part in (city.strip(), name.strip(), "景点 实景") if part)
-        with self._cache_lock:
-            if query in self._cache:
-                return self._cache[query]
+        queries = [
+            " ".join(part for part in (city.strip(), name.strip(), "景点 实景") if part),
+            " ".join(part for part in (city.strip(), name.strip()) if part),
+        ]
+        # 去除重复和空 query
+        unique_queries = []
+        for q in queries:
+            if q and q not in unique_queries:
+                unique_queries.append(q)
 
-        try:
-            image_url = self._search_image(query)
-        except Exception as exc:
-            logger.warning("景点图片搜索不可用 (%s): %s", query, exc)
-            return None
-        if image_url:
+        for query in unique_queries:
             with self._cache_lock:
-                self._cache[query] = image_url
-            logger.info("景点图片搜索成功 (bing): %s", query)
-        return image_url
+                if query in self._cache:
+                    return self._cache[query]
+
+            try:
+                image_url = self._search_image(query)
+            except Exception as exc:
+                logger.warning("景点图片搜索不可用 (%s): %s", query, exc)
+                continue
+
+            if image_url:
+                with self._cache_lock:
+                    self._cache[query] = image_url
+                logger.info("景点图片搜索成功 (bing): %s", query)
+                return image_url
+        return None
 
 
 _photo_service: Optional[DDGSPhotoService] = None

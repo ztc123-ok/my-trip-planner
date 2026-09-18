@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
 from ...services.ddgs_photo_service import get_ddgs_photo_service
+from ...services.photo_service import get_photo_service
 
 router = APIRouter(prefix="/poi", tags=["POI"])
 photo_search_limit = asyncio.Semaphore(3)
@@ -107,7 +108,7 @@ async def get_attraction_photo(name: str, city: str = ""):
     try:
         async with photo_search_limit:
             photo_url = await asyncio.to_thread(
-                lambda: get_ddgs_photo_service().get_photo_url(name, city)
+                lambda: get_photo_service().get_photo_url(name, city)
             )
 
         return {

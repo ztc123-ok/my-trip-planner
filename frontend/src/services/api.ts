@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse } from '@/types'
+import type { TripFormData, TripPlanResponse, PlanCandidateResponse, PlanConfirmRequest } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -36,7 +36,7 @@ apiClient.interceptors.response.use(
 )
 
 /**
- * 生成旅行计划
+ * 生成旅行计划 (单阶段一键生成)
  */
 export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
   try {
@@ -47,6 +47,33 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
   }
 }
+
+/**
+ * HITL 阶段一：准备旅行计划（搜索候选景点与酒店并在 planner 前挂起）
+ */
+export async function prepareTripPlan(formData: TripFormData): Promise<PlanCandidateResponse> {
+  try {
+    const response = await apiClient.post<PlanCandidateResponse>('/api/trip/plan/prepare', formData)
+    return response.data
+  } catch (error: any) {
+    console.error('准备旅行计划失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '准备旅行计划失败')
+  }
+}
+
+/**
+ * HITL 阶段二：确认候选并恢复执行生成最终旅行计划
+ */
+export async function confirmTripPlan(confirmData: PlanConfirmRequest): Promise<TripPlanResponse> {
+  try {
+    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan/confirm', confirmData)
+    return response.data
+  } catch (error: any) {
+    console.error('确认旅行计划失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '确认旅行计划失败')
+  }
+}
+
 
 /**
  * 健康检查

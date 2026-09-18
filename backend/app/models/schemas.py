@@ -179,6 +179,10 @@ class POIInfo(BaseModel):
     address: str = Field(..., description="地址")
     location: Optional[Location] = Field(default=None, description="经纬度坐标；搜索结果未提供时为空")
     tel: Optional[str] = Field(default=None, description="电话")
+    price_range: Optional[str] = Field(default=None, description="预估价格范围，如 '¥200~300/晚'")
+    rating: Optional[str] = Field(default=None, description="评分，如 '4.7'")
+    tag: Optional[str] = Field(default=None, description="酒店或POI特色标签，如 '经济快捷'、'品质舒适'")
+    distance: Optional[str] = Field(default=None, description="距最近候选景点的距离描述，如 '近天安门(800m)'")
 
 
 class POISearchResponse(BaseModel):
@@ -217,3 +221,31 @@ class ErrorResponse(BaseModel):
     success: bool = Field(default=False, description="是否成功")
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
+
+
+# ============ Human-in-the-Loop 模型 ============
+
+class PlanCandidateData(BaseModel):
+    """规划前候选数据（供用户确认）"""
+    thread_id: str = Field(..., description="规划会话ID，用于恢复图执行")
+    city: str = Field(..., description="城市")
+    travel_days: int = Field(..., description="天数")
+    candidate_attractions: List[POIInfo] = Field(default=[], description="候选景点列表")
+    candidate_hotels: List[POIInfo] = Field(default=[], description="候选酒店列表")
+    weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
+
+
+class PlanCandidateResponse(BaseModel):
+    """候选数据响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="候选数据获取成功，等待用户确认", description="消息")
+    data: Optional[PlanCandidateData] = Field(default=None, description="候选数据")
+
+
+class PlanConfirmRequest(BaseModel):
+    """用户确认候选并恢复规划的请求"""
+    thread_id: str = Field(..., description="规划会话ID")
+    selected_attractions: Optional[List[str]] = Field(default=None, description="用户选中的景点名称列表")
+    selected_hotel: Optional[str] = Field(default=None, description="用户选中的酒店名称")
+    user_feedback: Optional[str] = Field(default=None, description="用户额外调整要求或反馈")
+

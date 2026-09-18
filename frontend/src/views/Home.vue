@@ -161,6 +161,18 @@
           </a-form-item>
         </div>
 
+        <!-- 人机协同确认模式 (Human-in-the-Loop) -->
+        <div class="hitl-switch-card">
+          <div class="hitl-switch-info">
+            <span class="hitl-switch-icon">🤝</span>
+            <div>
+              <div class="hitl-switch-title">人机协同确认模式 (Human-in-the-Loop)</div>
+              <div class="hitl-switch-desc">并行搜索景点与酒店后暂停，由您挑选心仪候选并提出要求后再生成最终行程</div>
+            </div>
+          </div>
+          <a-switch v-model:checked="enableHitl" checked-children="开启" un-checked-children="关闭" />
+        </div>
+
         <!-- 提交按钮 -->
         <a-form-item>
           <a-button
@@ -173,7 +185,7 @@
           >
             <template v-if="!loading">
               <span class="button-icon">🚀</span>
-              <span>开始规划我的旅行</span>
+              <span>{{ enableHitl ? '搜集候选并确认 (人机协同)' : '开始规划我的旅行' }}</span>
             </template>
             <template v-else>
               <span>正在生成中...</span>
@@ -200,21 +212,103 @@
         </a-form-item>
       </a-form>
     </a-card>
+
+    <!-- HITL 候选确认弹窗 -->
+    <a-modal
+      v-model:open="hitlModalVisible"
+      title="🤝 人机协同：确认候选景点与酒店"
+      width="900px"
+      :confirm-loading="confirming"
+      ok-text="确认并生成行程计划"
+      cancel-text="放弃本次规划"
+      @ok="handleConfirmHitl"
+      @cancel="handleCancelHitl"
+    >
+      <div v-if="candidateData" class="hitl-modal-body">
+        <a-alert
+          message="已完成并行搜索，已在规划前挂起。请挑选您感兴趣的景点与酒店，也可在下方补充人工调整要求。"
+          type="info"
+          show-icon
+          style="margin-bottom: 16px;"
+        />
+
+        <div class="hitl-field-label">📍 候选景点列表 (已为您默认全选，可取消不感兴趣项):</div>
+        <div class="hitl-poi-scroll">
+          <a-checkbox-group v-model:value="selectedAttractions" style="width: 100%;">
+            <a-row :gutter="[12, 12]">
+              <a-col :span="12" v-for="poi in candidateData.candidate_attractions" :key="poi.name">
+                <div class="poi-select-card" :class="{ 'card-selected': selectedAttractions.includes(poi.name) }">
+                  <a-checkbox :value="poi.name" class="poi-checkbox">
+                    <div class="poi-info-content">
+                      <span class="poi-name" :title="poi.name">{{ poi.name }}</span>
+                      <span class="poi-addr" :title="poi.address">{{ poi.address || '地址未知' }}</span>
+                    </div>
+                  </a-checkbox>
+                </div>
+              </a-col>
+            </a-row>
+          </a-checkbox-group>
+        </div>
+
+        <div class="hitl-field-label" style="margin-top: 16px;">🏨 候选推荐酒店 (单选心仪酒店，可选):</div>
+        <div class="hitl-poi-scroll">
+          <a-radio-group v-model:value="selectedHotel" style="width: 100%;">
+            <a-row :gutter="[12, 12]">
+              <a-col :span="12" v-for="hotel in candidateData.candidate_hotels" :key="hotel.name">
+                <div class="poi-select-card hotel-select-card" :class="{ 'card-selected': selectedHotel === hotel.name }">
+                  <a-radio :value="hotel.name" class="hotel-radio">
+                    <div class="hotel-content">
+                      <div class="hotel-card-header">
+                        <span class="poi-name hotel-name" :title="hotel.name">{{ hotel.name }}</span>
+                        <span v-if="hotel.price_range" class="hotel-price-badge">{{ hotel.price_range }}</span>
+                      </div>
+                      <div class="hotel-meta-row" v-if="hotel.tag || hotel.rating || hotel.distance">
+                        <a-tag v-if="hotel.tag" color="blue" size="small">{{ hotel.tag }}</a-tag>
+                        <span v-if="hotel.rating" class="hotel-rating">⭐ {{ hotel.rating }}</span>
+                        <span v-if="hotel.distance" class="hotel-distance" :title="hotel.distance">📍 {{ hotel.distance }}</span>
+                      </div>
+                      <span class="poi-addr" :title="hotel.address">{{ hotel.address || '地址未知' }}</span>
+                    </div>
+                  </a-radio>
+                </div>
+              </a-col>
+            </a-row>
+          </a-radio-group>
+        </div>
+
+        <div class="hitl-field-label" style="margin-top: 16px;">✍️ 补充人工调整意见 (可选):</div>
+        <a-textarea
+          v-model:value="userFeedback"
+          placeholder="例如：第一天下午想在王府井逛街，晚餐希望安排北京烤鸭老字号"
+          :rows="2"
+        />
+      </div>
+    </a-modal>
   </div>
 </template>
+
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
-import type { TripFormData } from '@/types'
+import { generateTripPlan, prepareTripPlan, confirmTripPlan } from '@/services/api'
+import type { TripFormData, PlanCandidateData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
 const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
+
+// Human-in-the-Loop 人机协同状态
+const enableHitl = ref(false)
+const hitlModalVisible = ref(false)
+const confirming = ref(false)
+const candidateData = ref<PlanCandidateData | null>(null)
+const selectedAttractions = ref<string[]>([])
+const selectedHotel = ref<string | undefined>(undefined)
+const userFeedback = ref('')
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -271,7 +365,7 @@ const handleSubmit = async () => {
       } else if (loadingProgress.value <= 70) {
         loadingStatus.value = '🏨 正在推荐酒店...'
       } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
+        loadingStatus.value = enableHitl.value ? '⏸️ 等待人机确认...' : '📋 正在生成行程计划...'
       }
     }
   }, 500)
@@ -288,6 +382,28 @@ const handleSubmit = async () => {
       free_text_input: formData.free_text_input
     }
 
+    if (enableHitl.value) {
+      // 人机协同模式：第一阶段获取候选并挂起
+      const response = await prepareTripPlan(requestData)
+      clearInterval(progressInterval)
+      loading.value = false
+      loadingProgress.value = 0
+      loadingStatus.value = ''
+
+      if (response.success && response.data) {
+        candidateData.value = response.data
+        selectedAttractions.value = response.data.candidate_attractions.map(a => a.name)
+        selectedHotel.value = response.data.candidate_hotels.length > 0 ? response.data.candidate_hotels[0].name : undefined
+        userFeedback.value = ''
+        hitlModalVisible.value = true
+        message.info('候选景点与酒店已检索完成，请在弹窗中挑选确认！')
+      } else {
+        message.error(response.message || '获取候选数据失败')
+      }
+      return
+    }
+
+    // 默认全自动规划
     const response = await generateTripPlan(requestData)
 
     clearInterval(progressInterval)
@@ -295,12 +411,8 @@ const handleSubmit = async () => {
     loadingStatus.value = '✅ 完成!'
 
     if (response.success && response.data) {
-      // 保存到sessionStorage
       sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-
       message.success('旅行计划生成成功!')
-
-      // 短暂延迟后跳转
       setTimeout(() => {
         router.push('/result')
       }, 500)
@@ -311,12 +423,47 @@ const handleSubmit = async () => {
     clearInterval(progressInterval)
     message.error(error.message || '生成旅行计划失败,请稍后重试')
   } finally {
-    setTimeout(() => {
-      loading.value = false
-      loadingProgress.value = 0
-      loadingStatus.value = ''
-    }, 1000)
+    if (!enableHitl.value) {
+      setTimeout(() => {
+        loading.value = false
+        loadingProgress.value = 0
+        loadingStatus.value = ''
+      }, 1000)
+    }
   }
+}
+
+const handleConfirmHitl = async () => {
+  if (!candidateData.value) return
+  confirming.value = true
+  try {
+    const response = await confirmTripPlan({
+      thread_id: candidateData.value.thread_id,
+      selected_attractions: selectedAttractions.value,
+      selected_hotel: selectedHotel.value,
+      user_feedback: userFeedback.value
+    })
+    if (response.success && response.data) {
+      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
+      message.success('人机协同行程规划完成!')
+      hitlModalVisible.value = false
+      setTimeout(() => {
+        router.push('/result')
+      }, 500)
+    } else {
+      message.error(response.message || '生成旅行计划失败')
+    }
+  } catch (error: any) {
+    message.error(error.message || '确认生成失败')
+  } finally {
+    confirming.value = false
+  }
+}
+
+const handleCancelHitl = () => {
+  hitlModalVisible.value = false
+  candidateData.value = null
+  message.info('已取消本次人机协同规划')
 }
 </script>
 
@@ -649,6 +796,191 @@ const handleSubmit = async () => {
     opacity: 1;
     transform: translateY(0);
   }
+}
+/* Human-in-the-Loop 交互样式 */
+.hitl-switch-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%);
+  border: 1.5px solid rgba(102, 126, 234, 0.25);
+  border-radius: 12px;
+  transition: all 0.3s;
+}
+
+.hitl-switch-card:hover {
+  border-color: #667eea;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
+}
+
+.hitl-switch-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hitl-switch-icon {
+  font-size: 24px;
+}
+
+.hitl-switch-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: #2d3748;
+}
+
+.hitl-switch-desc {
+  font-size: 13px;
+  color: #718096;
+}
+
+.hitl-modal-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.hitl-field-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #2d3748;
+  margin-bottom: 8px;
+}
+
+.hitl-poi-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #edf2f7;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.poi-select-card {
+  background: #ffffff;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  height: 100%;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.poi-select-card:hover {
+  border-color: #cbd5e1;
+}
+
+.poi-select-card.card-selected {
+  border-color: #667eea;
+  background: #f7f9fe;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.08);
+}
+
+/* 保证 Ant Design 的 checkbox 和 radio 居顶对齐且内容铺满 */
+:deep(.poi-checkbox.ant-checkbox-wrapper),
+:deep(.hotel-radio.ant-radio-wrapper) {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  margin-right: 0;
+}
+
+:deep(.poi-checkbox .ant-checkbox),
+:deep(.hotel-radio .ant-radio) {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+:deep(.poi-checkbox > span:last-child),
+:deep(.hotel-radio > span:last-child) {
+  flex: 1;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.poi-info-content,
+.hotel-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.poi-name {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.4;
+}
+
+.hotel-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.poi-addr {
+  display: block;
+  font-size: 12px;
+  color: #a0aec0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.hotel-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.hotel-price-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e53e3e;
+  background: #fff5f5;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #fed7d7;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.hotel-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 2px 0;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.hotel-rating {
+  font-size: 11px;
+  color: #d69e2e;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.hotel-distance {
+  font-size: 11px;
+  color: #4a5568;
+  background: #edf2f7;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  flex-shrink: 1;
 }
 </style>
 

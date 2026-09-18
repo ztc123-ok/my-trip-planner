@@ -93,3 +93,39 @@ export interface TripPlanResponse {
   message: string
   data?: TripPlan
 }
+
+export interface POIInfo {
+  id: string
+  name: string
+  type: string
+  address: string
+  location?: Location
+  tel?: string
+  price_range?: string
+  rating?: string
+  tag?: string
+  distance?: string
+}
+
+export interface PlanCandidateData {
+  thread_id: string
+  city: string
+  travel_days: number
+  candidate_attractions: POIInfo[]
+  candidate_hotels: POIInfo[]
+  weather_info: WeatherInfo[]
+}
+
+export interface PlanCandidateResponse {
+  success: boolean
+  message: string
+  data?: PlanCandidateData
+}
+
+export interface PlanConfirmRequest {
+  thread_id: string
+  selected_attractions?: string[]
+  selected_hotel?: string
+  user_feedback?: string
+}
+
