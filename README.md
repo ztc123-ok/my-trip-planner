@@ -11,7 +11,7 @@
 
 ## 运行
 
-需要 Python 3.10+、Node.js 18+、高德地图 Web 服务和 JavaScript API 密钥、可用的 LLM API 密钥。景点图片通过 DDGS MCP 优先搜索 DuckDuckGo；DuckDuckGo 图片接口不可用时使用该 MCP 的 Bing 图片结果，无需 Unsplash 密钥。高德和 DDGS MCP 服务由 `uvx` 启动；如需代理，可在 `backend/.env` 配置 `DDGS_PROXY`。
+需要 Python 3.10+、Node.js 18+、高德地图 Web 服务和 JavaScript API 密钥、可用的 LLM API 密钥。景点图片直接通过 DDGS MCP 的 Bing 图片后端搜索，无需 Unsplash 密钥。高德和 DDGS MCP 服务由 `uvx` 启动；如需代理，可在 `backend/.env` 配置 `DDGS_PROXY`。
 
 ```powershell
 cd backend

@@ -11,7 +11,7 @@ from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_opt
 from app.api.main import app as api_app
 from app.models.schemas import TripRequest, TripPlan, WeatherInfo
 from app.services.amap_service import AmapService, create_amap_tool
-from app.services.duckduckgo_service import DuckDuckGoPhotoService
+from app.services.ddgs_photo_service import DDGSPhotoService
 from app.services.weather_service import (
     get_open_meteo_forecast, get_trip_forecast,
 )
@@ -262,14 +262,15 @@ class WeatherServiceTests(unittest.TestCase):
         self.assertEqual(get.call_args_list[1].kwargs["params"]["forecast_days"], 16)
 
 
-class DuckDuckGoPhotoServiceTests(unittest.TestCase):
-    def test_searches_duckduckgo_images_and_reuses_successful_url(self):
+class DDGSPhotoServiceTests(unittest.TestCase):
+    def test_searches_bing_images_and_reuses_successful_url(self):
         tool = FakeMCP("工具 'search_images' 执行结果:\n" + json.dumps([
             {"title": "网页", "url": "https://example.com/page"},
-            {"title": "西湖实景", "image": "https://example.com/west-lake.jpg"},
+            {"title": "西湖实景", "image": "https://example.com/blocked.jpg",
+             "thumbnail": "https://example.com/west-lake.jpg"},
         ], ensure_ascii=False))
         tool._available_tools = [{"name": "search_images"}]
-        service = DuckDuckGoPhotoService(mcp_tool=tool)
+        service = DDGSPhotoService(mcp_tool=tool)
 
         self.assertEqual(
             service.get_photo_url("西湖", "杭州"), "https://example.com/west-lake.jpg"
@@ -279,36 +280,14 @@ class DuckDuckGoPhotoServiceTests(unittest.TestCase):
         )
         self.assertEqual(len(tool.calls), 1)
         self.assertEqual(tool.calls[0]["tool_name"], "search_images")
-        self.assertEqual(tool.calls[0]["arguments"]["backend"], "duckduckgo")
+        self.assertEqual(tool.calls[0]["arguments"]["backend"], "bing")
         self.assertIn("杭州 西湖", tool.calls[0]["arguments"]["query"])
 
     def test_rejects_mcp_errors_instead_of_returning_non_image_url(self):
         tool = FakeMCP("异步操作失败: Error executing tool search_images")
         tool._available_tools = [{"name": "search_images"}]
-        with self.assertRaisesRegex(RuntimeError, "景点图片搜索不可用"):
-            DuckDuckGoPhotoService(mcp_tool=tool).get_photo_url("西湖")
-
-    def test_falls_back_when_duckduckgo_rejects_images(self):
-        class FallbackMCP(FakeMCP):
-            def run(self, call):
-                self.calls.append(call)
-                if call["arguments"]["backend"] == "duckduckgo":
-                    return "异步操作失败: Error executing tool search_images"
-                return "工具 'search_images' 执行结果:\n" + json.dumps([
-                    {"image": "https://example.com/blocked.jpg",
-                     "thumbnail": "https://example.com/attraction.jpg"},
-                ])
-
-        tool = FallbackMCP(None)
-        tool._available_tools = [{"name": "search_images"}]
-        service = DuckDuckGoPhotoService(mcp_tool=tool)
-        self.assertEqual(service.get_photo_url("故宫", "北京"), "https://example.com/attraction.jpg")
-        self.assertEqual(
-            [call["arguments"]["backend"] for call in tool.calls],
-            ["duckduckgo", "bing"],
-        )
-        service.get_photo_url("北海公园", "北京")
-        self.assertEqual(tool.calls[-1]["arguments"]["backend"], "bing")
+        with self.assertRaises(ValueError):
+            DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖")
 
     def test_parses_mcp_list_repr_and_skips_unsafe_image_url(self):
         tool = FakeMCP(
@@ -318,7 +297,7 @@ class DuckDuckGoPhotoServiceTests(unittest.TestCase):
         )
         tool._available_tools = [{"name": "search_images"}]
         self.assertEqual(
-            DuckDuckGoPhotoService(mcp_tool=tool).get_photo_url("西湖"),
+            DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖"),
             "https://example.com/west-lake-thumb.jpg",
         )
 
@@ -336,11 +315,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"][0]["name"], "故宫")
 
-    def test_photo_endpoint_returns_duckduckgo_image_url(self):
+    def test_photo_endpoint_returns_ddgs_image_url(self):
         service = unittest.mock.Mock()
         service.get_photo_url.return_value = "https://example.com/west-lake.jpg"
         with patch("app.api.main.validate_config"), patch(
-            "app.api.routes.poi.get_duckduckgo_photo_service", return_value=service
+            "app.api.routes.poi.get_ddgs_photo_service", return_value=service
         ), TestClient(api_app) as client:
             response = client.get("/api/poi/photo", params={"name": "西湖", "city": "杭州"})
         self.assertEqual(response.status_code, 200)

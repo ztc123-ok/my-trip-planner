@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
-from ...services.duckduckgo_service import get_duckduckgo_photo_service
+from ...services.ddgs_photo_service import get_ddgs_photo_service
 
 router = APIRouter(prefix="/poi", tags=["POI"])
 photo_search_limit = asyncio.Semaphore(3)
@@ -91,7 +91,7 @@ async def search_poi(keywords: str, city: str = "北京"):
 @router.get(
     "/photo",
     summary="获取景点图片",
-    description="根据景点名称通过 DuckDuckGo MCP 搜索图片"
+    description="根据景点名称通过 DDGS MCP 的 Bing 图片后端搜索图片"
 )
 async def get_attraction_photo(name: str, city: str = ""):
     """
@@ -107,7 +107,7 @@ async def get_attraction_photo(name: str, city: str = ""):
     try:
         async with photo_search_limit:
             photo_url = await asyncio.to_thread(
-                lambda: get_duckduckgo_photo_service().get_photo_url(name, city)
+                lambda: get_ddgs_photo_service().get_photo_url(name, city)
             )
 
         return {
