@@ -2,16 +2,21 @@
 
 import ast
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from hello_agents.tools import MCPTool
 
 from .amap_service import resolve_uvx
+
+logger = logging.getLogger(__name__)
+DUCKDUCKGO_RETRY_SECONDS = 300
 
 
 def _image_results(value: Any) -> list[dict]:
@@ -65,7 +70,8 @@ class DuckDuckGoPhotoService:
                 description="DuckDuckGo 景点图片搜索",
                 server_command=[
                     resolve_uvx(), "--python", sys.executable,
-                    "--from", "ddgs[mcp]==9.16.0", "ddgs", "mcp",
+                    "--from", "ddgs[mcp]==9.16.0", "python", "-u",
+                    str(Path(__file__).with_name("ddgs_mcp_launcher.py")),
                 ],
                 env=tool_env,
                 auto_expand=True,
@@ -78,30 +84,55 @@ class DuckDuckGoPhotoService:
         self.mcp_tool = mcp_tool
         self._cache: dict[str, str] = {}
         self._cache_lock = Lock()
+        self._duckduckgo_retry_after = 0.0
 
-    def get_photo_url(self, name: str, city: str = "") -> Optional[str]:
-        query = " ".join(part for part in (city.strip(), name.strip(), "景点 实景") if part)
-        with self._cache_lock:
-            if query in self._cache:
-                return self._cache[query]
-
+    def _search_image(self, query: str, backend: str) -> Optional[str]:
         raw = self.mcp_tool.run({
             "action": "call_tool",
             "tool_name": "search_images",
             "arguments": {
                 "query": query,
-                "backend": "duckduckgo",
+                "backend": backend,
                 "region": "cn-zh",
                 "safesearch": "moderate",
                 "max_results": 5,
             },
         })
         for item in _image_results(raw):
-            image_url = _valid_image_url(item.get("image")) or _valid_image_url(item.get("thumbnail"))
+            # Bing thumbnails are served by its image CDN; source sites may block hotlinks.
+            fields = ("thumbnail", "image") if backend == "bing" else ("image", "thumbnail")
+            for field in fields:
+                image_url = _valid_image_url(item.get(field))
+                if image_url:
+                    return image_url
+        return None
+
+    def get_photo_url(self, name: str, city: str = "") -> Optional[str]:
+        query = " ".join(part for part in (city.strip(), name.strip(), "景点 实景") if part)
+        with self._cache_lock:
+            if query in self._cache:
+                return self._cache[query]
+            try_duckduckgo = monotonic() >= self._duckduckgo_retry_after
+
+        failures = []
+        for backend in (("duckduckgo", "bing") if try_duckduckgo else ("bing",)):
+            try:
+                image_url = self._search_image(query, backend)
+            except Exception as exc:
+                failures.append(f"{backend}: {exc}")
+                logger.warning("景点图片搜索失败 (%s): %s", backend, exc)
+                image_url = None
             if image_url:
                 with self._cache_lock:
                     self._cache[query] = image_url
+                logger.info("景点图片搜索成功 (%s): %s", backend, query)
                 return image_url
+            if backend == "duckduckgo":
+                with self._cache_lock:
+                    self._duckduckgo_retry_after = monotonic() + DUCKDUCKGO_RETRY_SECONDS
+
+        if failures:
+            raise RuntimeError("景点图片搜索不可用: " + "; ".join(failures))
         return None
 
 

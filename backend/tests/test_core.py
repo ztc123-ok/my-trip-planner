@@ -285,8 +285,30 @@ class DuckDuckGoPhotoServiceTests(unittest.TestCase):
     def test_rejects_mcp_errors_instead_of_returning_non_image_url(self):
         tool = FakeMCP("异步操作失败: Error executing tool search_images")
         tool._available_tools = [{"name": "search_images"}]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(RuntimeError, "景点图片搜索不可用"):
             DuckDuckGoPhotoService(mcp_tool=tool).get_photo_url("西湖")
+
+    def test_falls_back_when_duckduckgo_rejects_images(self):
+        class FallbackMCP(FakeMCP):
+            def run(self, call):
+                self.calls.append(call)
+                if call["arguments"]["backend"] == "duckduckgo":
+                    return "异步操作失败: Error executing tool search_images"
+                return "工具 'search_images' 执行结果:\n" + json.dumps([
+                    {"image": "https://example.com/blocked.jpg",
+                     "thumbnail": "https://example.com/attraction.jpg"},
+                ])
+
+        tool = FallbackMCP(None)
+        tool._available_tools = [{"name": "search_images"}]
+        service = DuckDuckGoPhotoService(mcp_tool=tool)
+        self.assertEqual(service.get_photo_url("故宫", "北京"), "https://example.com/attraction.jpg")
+        self.assertEqual(
+            [call["arguments"]["backend"] for call in tool.calls],
+            ["duckduckgo", "bing"],
+        )
+        service.get_photo_url("北海公园", "北京")
+        self.assertEqual(tool.calls[-1]["arguments"]["backend"], "bing")
 
     def test_parses_mcp_list_repr_and_skips_unsafe_image_url(self):
         tool = FakeMCP(
