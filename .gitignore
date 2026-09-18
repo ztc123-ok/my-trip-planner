@@ -22,3 +22,4 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+/backend/a.log

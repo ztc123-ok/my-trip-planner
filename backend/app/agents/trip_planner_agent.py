@@ -1,78 +1,27 @@
-"""多智能体旅行规划系统"""
+"""LangGraph 多角色旅行规划工作流。"""
 
 import json
 import time
-from typing import Any
-from hello_agents import SimpleAgent
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
+
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
 from ..services.weather_service import get_trip_forecast
-from ..models.schemas import TripRequest, TripPlan
+from ..models.schemas import TripRequest, TripPlan, WeatherInfo
 from ..config import get_settings
 
 # ============ Agent提示词 ============
 
-ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据城市和用户偏好搜索合适的景点。
+ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。根据高德地图 MCP 已返回的真实景点资料，
+整理适合目的地和用户偏好的景点。保留名称、地址与坐标，不要编造未提供的地点。"""
 
-**重要提示:**
-你必须使用工具来搜索景点!不要自己编造景点信息!
+WEATHER_AGENT_PROMPT = """你是天气查询专家。只根据已取得的真实预报简要说明天气。
+不得添加不存在的日期或编造温度。"""
 
-**工具调用格式:**
-使用maps_text_search工具时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_text_search:keywords=景点关键词,city=城市名]`
-
-**示例:**
-用户: "搜索北京的历史文化景点"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=历史文化,city=北京]
-
-用户: "搜索上海的公园"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=公园,city=上海]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-3. 参数用逗号分隔
-"""
-
-WEATHER_AGENT_PROMPT = """你是天气查询专家。你的任务是查询指定城市的天气信息。
-
-**重要提示:**
-你必须使用工具来查询天气!不要自己编造天气信息!
-
-**工具调用格式:**
-使用maps_weather工具时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_weather:city=城市名]`
-
-**示例:**
-用户: "查询北京天气"
-你的回复: [TOOL_CALL:amap_maps_weather:city=北京]
-
-用户: "上海的天气怎么样"
-你的回复: [TOOL_CALL:amap_maps_weather:city=上海]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-"""
-
-HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市和景点位置推荐合适的酒店。
-
-**重要提示:**
-你必须使用工具来搜索酒店!不要自己编造酒店信息!
-
-**工具调用格式:**
-使用maps_text_search工具搜索酒店时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_text_search:keywords=酒店,city=城市名]`
-
-**示例:**
-用户: "搜索北京的酒店"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=酒店,city=北京]
-
-**注意:**
-1. 必须使用工具,不要直接回答
-2. 格式必须完全正确,包括方括号和冒号
-3. 关键词使用"酒店"或"宾馆"
-"""
+HOTEL_AGENT_PROMPT = """你是酒店推荐专家。根据高德地图 MCP 已返回的真实酒店资料，
+整理适合用户住宿偏好的酒店。保留名称、地址与坐标，不要编造未提供的酒店。"""
 
 PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息和天气信息,生成详细的旅行计划。
 
@@ -164,177 +113,140 @@ def planner_llm_options(llm) -> dict:
     return {}
 
 
+class TripGraphState(TypedDict, total=False):
+    request: TripRequest
+    attraction_response: str
+    weather_data: list[WeatherInfo]
+    weather_source: str
+    weather_response: str
+    hotel_response: str
+    planner_response: str
+    trip_plan: TripPlan
+
+
 class MultiAgentTripPlanner:
-    """多智能体旅行规划系统"""
+    """Four specialist LangGraph nodes with a validated TripPlan output."""
 
-    def __init__(self):
-        """初始化多智能体系统"""
-        print("🔄 开始初始化多智能体旅行规划系统...")
+    agent_names = ("景点搜索专家", "天气查询专家", "酒店推荐专家", "行程规划专家")
 
-        try:
-            settings = get_settings()
-            self.llm = get_llm()
+    def __init__(self, llm=None, amap_service: AmapService | None = None):
+        settings = get_settings()
+        self.llm = llm if llm is not None else get_llm()
+        self.amap_service = (
+            amap_service if amap_service is not None
+            else AmapService(mcp_tool=create_amap_tool(settings.amap_api_key))
+        )
+        builder = StateGraph(TripGraphState)
+        builder.add_node("attractions", self._search_attractions)
+        builder.add_node("weather", self._get_weather)
+        builder.add_node("hotels", self._search_hotels)
+        builder.add_node("planner", self._generate_plan)
+        builder.add_node("validate", self._validate_plan)
+        builder.add_edge(START, "attractions")
+        builder.add_edge("attractions", "weather")
+        builder.add_edge("weather", "hotels")
+        builder.add_edge("hotels", "planner")
+        builder.add_edge("planner", "validate")
+        builder.add_edge("validate", END)
+        self.graph = builder.compile()
 
-            # 创建共享的MCP工具(只创建一次)
-            print("  - 创建共享MCP工具...")
-            self.amap_tool = create_amap_tool(settings.amap_api_key)
-
-            # 创建景点搜索Agent
-            print("  - 创建景点搜索Agent...")
-            self.attraction_agent = SimpleAgent(
-                name="景点搜索专家",
-                llm=self.llm,
-                system_prompt=ATTRACTION_AGENT_PROMPT
-            )
-            self.attraction_agent.add_tool(self.amap_tool)
-
-            # 创建天气查询Agent
-            print("  - 创建天气查询Agent...")
-            self.weather_agent = SimpleAgent(
-                name="天气查询专家",
-                llm=self.llm,
-                system_prompt=WEATHER_AGENT_PROMPT
-            )
-            self.weather_agent.add_tool(self.amap_tool)
-
-            # 创建酒店推荐Agent
-            print("  - 创建酒店推荐Agent...")
-            self.hotel_agent = SimpleAgent(
-                name="酒店推荐专家",
-                llm=self.llm,
-                system_prompt=HOTEL_AGENT_PROMPT
-            )
-            self.hotel_agent.add_tool(self.amap_tool)
-
-            # 创建行程规划Agent(不需要工具)
-            print("  - 创建行程规划Agent...")
-            self.planner_agent = SimpleAgent(
-                name="行程规划专家",
-                llm=self.llm,
-                system_prompt=PLANNER_AGENT_PROMPT
-            )
-
-            print(f"✅ 多智能体系统初始化成功")
-            print(f"   景点搜索Agent: {len(self.attraction_agent.list_tools())} 个工具")
-            print(f"   天气查询Agent: {len(self.weather_agent.list_tools())} 个工具")
-            print(f"   酒店推荐Agent: {len(self.hotel_agent.list_tools())} 个工具")
-
-        except Exception as e:
-            print(f"❌ 多智能体系统初始化失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
     def plan_trip(self, request: TripRequest) -> TripPlan:
-        """
-        使用多智能体协作生成旅行计划
+        print(f"🚀 LangGraph 开始规划 {request.city} 的 {request.travel_days} 天行程")
+        result = self.graph.invoke({"request": request})
+        print("✅ LangGraph 旅行计划生成完成")
+        return result["trip_plan"]
 
-        Args:
-            request: 旅行请求
+    def _search_attractions(self, state: TripGraphState) -> dict:
+        request = state["request"]
+        keywords = request.preferences[0] if request.preferences else "景点"
+        print("📍 步骤1: 搜索景点...")
+        pois = self.amap_service.search_poi(keywords, request.city)
+        if not pois:
+            raise ValueError(f"高德地图未找到 {request.city} 的{keywords}景点")
+        verified = json.dumps([poi.model_dump(mode="json") for poi in pois], ensure_ascii=False)
+        summary = self.llm.generate(
+            ATTRACTION_AGENT_PROMPT,
+            f"城市：{request.city}；偏好：{', '.join(request.preferences) or '无'}。已检索景点：{verified}",
+        )
+        return {"attraction_response": f"高德地图真实景点：{verified}\n专家整理：{summary}"}
 
-        Returns:
-            旅行计划
-        """
+    def _get_weather(self, state: TripGraphState) -> dict:
+        request = state["request"]
+        print("🌤️  步骤2: 查询天气...")
         try:
-            print(f"\n{'='*60}")
-            print(f"🚀 开始多智能体协作规划旅行...")
-            print(f"目的地: {request.city}")
-            print(f"日期: {request.start_date} 至 {request.end_date}")
-            print(f"天数: {request.travel_days}天")
-            print(f"偏好: {', '.join(request.preferences) if request.preferences else '无'}")
-            print(f"{'='*60}\n")
-
-            # 步骤1: 景点搜索Agent搜索景点
-            print("📍 步骤1: 搜索景点...")
-            attraction_query = self._build_attraction_query(request)
-            attraction_response = self.attraction_agent.run(attraction_query)
-            print(f"景点搜索结果: {attraction_response[:200]}...\n")
-
-            # 步骤2: 天气查询Agent查询天气
-            print("🌤️  步骤2: 查询天气...")
-            try:
-                weather_data, weather_source = get_trip_forecast(
-                    AmapService(mcp_tool=self.amap_tool), request.city,
-                    request.start_date, request.end_date
-                )
-                print(
-                    f"行程日期内有效天气预报: {len(weather_data)} 天 "
-                    f"({', '.join(item.date for item in weather_data) or '无'})，来源: {weather_source}"
-                )
-            except Exception as weather_error:
-                weather_data = []
-                weather_response = f"天气查询不可用：{weather_error}。请勿编造天气数据。"
-            else:
-                if not weather_data:
-                    weather_response = "旅行日期内暂无可靠的天气预报，请勿编造天气数据。"
-                elif weather_source != "高德地图":
-                    weather_response = f"已取得 {weather_source} 的 {len(weather_data)} 天预报。"
-                else:
-                    weather_query = f"请查询{request.city}的天气信息"
-                    try:
-                        weather_response = self.weather_agent.run(weather_query)
-                    except Exception as weather_error:
-                        weather_response = f"天气摘要不可用：{weather_error}。使用已获取的真实预报。"
-            print(f"天气查询结果: {weather_response[:200]}...\n")
-
-            # 步骤3: 酒店推荐Agent搜索酒店
-            print("🏨 步骤3: 搜索酒店...")
-            hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
-            hotel_response = self.hotel_agent.run(hotel_query)
-            print(f"酒店搜索结果: {hotel_response[:200]}...\n")
-
-            # 步骤4: 行程规划Agent整合信息生成计划
-            print("📋 步骤4: 生成行程计划...")
-            verified_weather = json.dumps(
-                [item.model_dump() for item in weather_data], ensure_ascii=False
-            ) if weather_data else weather_response
-            planner_query = self._build_planner_query(
-                request, attraction_response, verified_weather, hotel_response
+            weather_data, weather_source = get_trip_forecast(
+                self.amap_service, request.city, request.start_date, request.end_date
             )
-            planner_started = time.monotonic()
-            try:
-                planner_response = self.planner_agent.run(
-                    planner_query, **planner_llm_options(getattr(self, "llm", None))
-                )
-            finally:
-                print(f"步骤4 模型调用耗时: {time.monotonic() - planner_started:.1f} 秒")
-            print(f"行程规划结果: {planner_response[:300]}...\n")
-
-            # 解析最终计划
-            trip_plan = self._parse_response(planner_response, request)
-            trip_plan.weather_info = weather_data
-            if not weather_data:
-                trip_plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
-            elif weather_source != "高德地图":
-                trip_plan.overall_suggestions += (
-                    f" 天气来源：{weather_source}；Open-Meteo 的温度为当日最高/最低气温，"
-                    "请在临行前复查。"
-                )
-
-            print(f"{'='*60}")
-            print(f"✅ 旅行计划生成完成!")
-            print(f"{'='*60}\n")
-
-            return trip_plan
-
-        except Exception as e:
-            print(f"❌ 生成旅行计划失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
-    def _build_attraction_query(self, request: TripRequest) -> str:
-        """构建景点搜索查询 - 直接包含工具调用"""
-        keywords = []
-        if request.preferences:
-            # 只取第一个偏好作为关键词
-            keywords = request.preferences[0]
+        except Exception as exc:
+            weather_data, weather_source = [], ""
+            weather_response = f"天气查询不可用：{exc}。请勿编造天气数据。"
         else:
-            keywords = "景点"
+            if not weather_data:
+                weather_response = "旅行日期内暂无可靠的天气预报，请勿编造天气数据。"
+            elif weather_source != "高德地图":
+                weather_response = f"已取得 {weather_source} 的 {len(weather_data)} 天预报。"
+            else:
+                verified = json.dumps(
+                    [item.model_dump(mode="json") for item in weather_data], ensure_ascii=False
+                )
+                try:
+                    weather_response = self.llm.generate(
+                        WEATHER_AGENT_PROMPT, f"城市：{request.city}；已取得预报：{verified}"
+                    )
+                except Exception as exc:
+                    weather_response = f"天气摘要不可用：{exc}。使用已获取的真实预报。"
+        return {
+            "weather_data": weather_data,
+            "weather_source": weather_source,
+            "weather_response": weather_response,
+        }
 
-        # 直接返回工具调用格式
-        query = f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n[TOOL_CALL:amap_maps_text_search:keywords={keywords},city={request.city}]"
-        return query
+    def _search_hotels(self, state: TripGraphState) -> dict:
+        request = state["request"]
+        print("🏨 步骤3: 搜索酒店...")
+        pois = self.amap_service.search_poi("酒店", request.city)
+        if not pois:
+            raise ValueError(f"高德地图未找到 {request.city} 的酒店")
+        verified = json.dumps([poi.model_dump(mode="json") for poi in pois], ensure_ascii=False)
+        summary = self.llm.generate(
+            HOTEL_AGENT_PROMPT,
+            f"城市：{request.city}；住宿偏好：{request.accommodation}。已检索酒店：{verified}",
+        )
+        return {"hotel_response": f"高德地图真实酒店：{verified}\n专家整理：{summary}"}
+
+    def _generate_plan(self, state: TripGraphState) -> dict:
+        request = state["request"]
+        print("📋 步骤4: 生成行程计划...")
+        weather_data = state["weather_data"]
+        verified_weather = (
+            json.dumps([item.model_dump(mode="json") for item in weather_data], ensure_ascii=False)
+            if weather_data else state["weather_response"]
+        )
+        query = self._build_planner_query(
+            request, state["attraction_response"], verified_weather, state["hotel_response"]
+        )
+        started = time.monotonic()
+        try:
+            response = self.llm.generate(
+                PLANNER_AGENT_PROMPT, query, **planner_llm_options(self.llm)
+            )
+        finally:
+            print(f"步骤4 模型调用耗时: {time.monotonic() - started:.1f} 秒")
+        return {"planner_response": response}
+
+    def _validate_plan(self, state: TripGraphState) -> dict:
+        plan = self._parse_response(state["planner_response"], state["request"])
+        weather_data = state["weather_data"]
+        weather_source = state["weather_source"]
+        plan.weather_info = weather_data
+        if not weather_data:
+            plan.overall_suggestions += " 旅行日期暂无可靠天气预报，请临行前再次查询。"
+        elif weather_source != "高德地图":
+            plan.overall_suggestions += (
+                f" 天气来源：{weather_source}；Open-Meteo 的温度为当日最高/最低气温，"
+                "请在临行前复查。"
+            )
+        return {"trip_plan": plan}
 
     def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "") -> str:
         """构建行程规划查询"""

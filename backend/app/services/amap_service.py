@@ -5,12 +5,12 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional
-
-from hello_agents.tools import MCPTool
 
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, RouteInfo, WeatherInfo
+from .mcp_client import MCPToolClient
 
 
 def decode_payload(value: Any) -> Any:
@@ -73,7 +73,7 @@ def resolve_uvx() -> str:
     )
 
 
-def create_amap_tool(api_key: str) -> MCPTool:
+def create_amap_tool(api_key: str) -> MCPToolClient:
     """发现并检查高德 MCP 工具，避免空工具被注册给 Agent。"""
     if not api_key:
         raise ValueError("请在 backend/.env 配置 AMAP_API_KEY")
@@ -84,38 +84,33 @@ def create_amap_tool(api_key: str) -> MCPTool:
         "UV_TOOL_DIR": os.getenv("UV_TOOL_DIR") or str(runtime_dir / ".uv-tools"),
         "UV_TOOL_BIN_DIR": os.getenv("UV_TOOL_BIN_DIR") or str(runtime_dir / ".uv-bin"),
     }
-    tool = MCPTool(
-        name="amap",
-        description="高德地图服务",
-        server_command=[resolve_uvx(), "--python", sys.executable, "amap-mcp-server"],
+    tool = MCPToolClient(
+        server_command=[
+            resolve_uvx(), "--offline", "--python", sys.executable,
+            "amap-mcp-server==0.1.11",
+        ],
         env=tool_env,
-        auto_expand=True,
     )
-    available = {
-        item.get("name") for item in tool._available_tools if isinstance(item, dict)
-    }
+    available = set(tool.available_tools)
     required = {"maps_text_search", "maps_weather"}
     if not required.issubset(available):
         raise RuntimeError(
             "高德 MCP 工具发现失败，缺少 "
             + ", ".join(sorted(required - available))
-            + "。请确认 uvx 可运行、amap-mcp-server 能启动，"
+            + "。请确认已按 README 安装 MCP 服务、uvx 可运行，"
             + f"并检查缓存目录 {tool_env['UV_CACHE_DIR']} 是否可写。"
         )
-    tool.expandable = True
     return tool
 
 
 class AmapService:
-    def __init__(self, mcp_tool: Optional[MCPTool] = None):
+    def __init__(self, mcp_tool: Optional[MCPToolClient] = None):
         if mcp_tool is None:
             mcp_tool = create_amap_tool(get_settings().amap_api_key)
         self.mcp_tool = mcp_tool
 
     def _call(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        result = decode_payload(self.mcp_tool.run({
-            "action": "call_tool", "tool_name": tool_name, "arguments": arguments,
-        }))
+        result = decode_payload(self.mcp_tool.call_tool(tool_name, arguments))
         if not isinstance(result, dict):
             raise ValueError("高德地图返回格式不正确")
         if str(result.get("status", "1")) == "0":
@@ -214,10 +209,12 @@ class AmapService:
 
 
 _amap_service: Optional[AmapService] = None
+_amap_service_lock = Lock()
 
 
 def get_amap_service() -> AmapService:
     global _amap_service
-    if _amap_service is None:
-        _amap_service = AmapService()
-    return _amap_service
+    with _amap_service_lock:
+        if _amap_service is None:
+            _amap_service = AmapService()
+        return _amap_service

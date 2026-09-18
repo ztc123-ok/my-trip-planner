@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from app.agents.trip_planner_agent import MultiAgentTripPlanner, planner_llm_options
 from app.api.main import app as api_app
-from app.models.schemas import TripRequest, TripPlan, WeatherInfo
+from app.models.schemas import POIInfo, TripRequest, TripPlan, WeatherInfo
 from app.services.amap_service import AmapService, create_amap_tool
 from app.services.ddgs_photo_service import DDGSPhotoService
 from app.services.weather_service import (
@@ -23,9 +23,10 @@ class FakeMCP:
     def __init__(self, payload):
         self.payload = payload
         self.calls = []
+        self.available_tools = []
 
-    def run(self, call):
-        self.calls.append(call)
+    def call_tool(self, name, arguments):
+        self.calls.append({"tool_name": name, "arguments": arguments})
         return self.payload
 
 
@@ -57,15 +58,19 @@ class TripModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             agent._parse_response("没有 JSON", request())
 
-    def test_unavailable_weather_is_not_invented(self):
-        class FakeAgent:
+    def test_langgraph_preserves_verified_weather_and_plan_schema(self):
+        class FakeLLM:
+            provider = "qwen"
+            model = "qwen3.8-flash"
+            timeout = 60
+
             def __init__(self, response):
                 self.response = response
-                self.calls = 0
+                self.calls = []
 
-            def run(self, _query, **_kwargs):
-                self.calls += 1
-                return self.response
+            def generate(self, system_prompt, user_prompt, **options):
+                self.calls.append((system_prompt, user_prompt, options))
+                return self.response if len(self.calls) == 3 else "已根据地图结果整理"
 
         trip_request = request(end_date="2026-10-01", travel_days=1)
         plan_data = {
@@ -83,24 +88,25 @@ class TripModelTests(unittest.TestCase):
                     for kind in ("breakfast", "lunch", "dinner")
                 ],
             }],
-            "weather_info": [{
-                "date": "2026-10-01", "day_weather": "晴",
-            }],
+            "weather_info": [{"date": "2026-10-01", "day_weather": "晴"}],
             "overall_suggestions": "建议",
         }
-        agent = MultiAgentTripPlanner.__new__(MultiAgentTripPlanner)
-        agent.amap_tool = object()
-        agent.attraction_agent = FakeAgent("景点")
-        agent.weather_agent = FakeAgent("天气")
-        agent.hotel_agent = FakeAgent("酒店")
-        agent.planner_agent = FakeAgent(json.dumps(plan_data, ensure_ascii=False))
-        with patch("app.agents.trip_planner_agent.AmapService") as amap, \
-                patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError("城市查询失败")):
-            amap.return_value.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
-            plan = agent.plan_trip(trip_request)
+        llm = FakeLLM(json.dumps(plan_data, ensure_ascii=False))
+        amap = unittest.mock.Mock()
+        amap.search_poi.side_effect = [
+            [POIInfo(id="1", name="故宫", type="景点", address="北京")],
+            [POIInfo(id="2", name="北京酒店", type="酒店", address="北京")],
+        ]
+        amap.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
+        planner = MultiAgentTripPlanner(llm=llm, amap_service=amap)
+        with patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError("城市查询失败")):
+            plan = planner.plan_trip(trip_request)
         self.assertEqual(plan.weather_info, [])
-        self.assertEqual(agent.weather_agent.calls, 0)
         self.assertIn("天气预报", plan.overall_suggestions)
+        self.assertEqual([call.args[0] for call in amap.search_poi.call_args_list], ["历史文化", "酒店"])
+        self.assertEqual(len(llm.calls), 3)
+        self.assertEqual(llm.calls[-1][2]["extra_body"], {"enable_thinking": False})
+        self.assertIn("planner", planner.graph.get_graph().nodes)
 
 
 class AmapServiceTests(unittest.TestCase):
@@ -110,22 +116,22 @@ class AmapServiceTests(unittest.TestCase):
 
     def test_discovery_uses_backend_python(self):
         tool = FakeMCP(None)
-        tool._available_tools = [
-            {"name": "maps_text_search"}, {"name": "maps_weather"}
-        ]
+        tool.available_tools = ["maps_text_search", "maps_weather"]
         with patch.dict(os.environ, {
             "UV_CACHE_DIR": "", "UV_TOOL_DIR": "", "UV_TOOL_BIN_DIR": "",
-        }), patch("app.services.amap_service.MCPTool", return_value=tool) as factory:
+        }), patch("app.services.amap_service.MCPToolClient", return_value=tool) as factory:
             self.assertIs(create_amap_tool("test-key"), tool)
-        self.assertEqual(factory.call_args.kwargs["server_command"][2], sys.executable)
-        self.assertTrue(Path(factory.call_args.kwargs["server_command"][0]).is_file())
+        command = factory.call_args.kwargs["server_command"]
+        self.assertEqual(command[1], "--offline")
+        self.assertEqual(command[3], sys.executable)
+        self.assertEqual(command[-1], "amap-mcp-server==0.1.11")
+        self.assertTrue(Path(command[0]).is_file())
         self.assertTrue(factory.call_args.kwargs["env"]["UV_CACHE_DIR"].endswith(".uv-cache"))
-        self.assertTrue(tool.expandable)
 
     def test_empty_discovery_fails_before_agent_runs(self):
         tool = FakeMCP(None)
-        tool._available_tools = []
-        with patch("app.services.amap_service.MCPTool", return_value=tool):
+        tool.available_tools = []
+        with patch("app.services.amap_service.MCPToolClient", return_value=tool):
             with self.assertRaisesRegex(RuntimeError, "工具发现失败"):
                 create_amap_tool("test-key")
 
@@ -263,13 +269,23 @@ class WeatherServiceTests(unittest.TestCase):
 
 
 class DDGSPhotoServiceTests(unittest.TestCase):
+    def test_discovery_uses_cached_mcp_package(self):
+        tool = FakeMCP(None)
+        tool.available_tools = ["search_images"]
+        with patch("app.services.ddgs_photo_service.MCPToolClient", return_value=tool) as factory:
+            DDGSPhotoService()
+        command = factory.call_args.kwargs["server_command"]
+        self.assertEqual(command[1], "--offline")
+        self.assertEqual(command[3], sys.executable)
+        self.assertIn("ddgs[mcp]==9.16.0", command)
+
     def test_searches_bing_images_and_reuses_successful_url(self):
         tool = FakeMCP("工具 'search_images' 执行结果:\n" + json.dumps([
             {"title": "网页", "url": "https://example.com/page"},
             {"title": "西湖实景", "image": "https://example.com/blocked.jpg",
              "thumbnail": "https://example.com/west-lake.jpg"},
         ], ensure_ascii=False))
-        tool._available_tools = [{"name": "search_images"}]
+        tool.available_tools = ["search_images"]
         service = DDGSPhotoService(mcp_tool=tool)
 
         self.assertEqual(
@@ -283,11 +299,20 @@ class DDGSPhotoServiceTests(unittest.TestCase):
         self.assertEqual(tool.calls[0]["arguments"]["backend"], "bing")
         self.assertIn("杭州 西湖", tool.calls[0]["arguments"]["query"])
 
-    def test_rejects_mcp_errors_instead_of_returning_non_image_url(self):
+    def test_mcp_error_returns_no_image(self):
         tool = FakeMCP("异步操作失败: Error executing tool search_images")
-        tool._available_tools = [{"name": "search_images"}]
-        with self.assertRaises(ValueError):
-            DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖")
+        tool.available_tools = ["search_images"]
+        self.assertIsNone(DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖"))
+
+    def test_photo_endpoint_returns_empty_result_when_search_is_unavailable(self):
+        service = unittest.mock.Mock()
+        service.get_photo_url.return_value = None
+        with patch("app.api.main.validate_config"), patch(
+            "app.api.routes.poi.get_ddgs_photo_service", return_value=service
+        ), TestClient(api_app) as client:
+            response = client.get("/api/poi/photo", params={"name": "西湖", "city": "杭州"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["data"]["photo_url"])
 
     def test_parses_mcp_list_repr_and_skips_unsafe_image_url(self):
         tool = FakeMCP(
@@ -295,7 +320,7 @@ class DDGSPhotoServiceTests(unittest.TestCase):
             "[{'image': 'javascript:alert(1)'}, "
             "{'thumbnail': 'https://example.com/west-lake-thumb.jpg'}]"
         )
-        tool._available_tools = [{"name": "search_images"}]
+        tool.available_tools = ["search_images"]
         self.assertEqual(
             DDGSPhotoService(mcp_tool=tool).get_photo_url("西湖"),
             "https://example.com/west-lake-thumb.jpg",

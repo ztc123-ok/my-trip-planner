@@ -77,12 +77,7 @@ async def health_check():
             "status": "healthy",
             "service": "trip-planner",
             "agent_name": "多智能体旅行规划系统",
-            "agents": [
-                agent.attraction_agent.name,
-                agent.weather_agent.name,
-                agent.hotel_agent.name,
-                agent.planner_agent.name,
-            ]
+            "agents": list(agent.agent_names)
         }
     except Exception as e:
         raise HTTPException(

@@ -10,15 +10,14 @@ from threading import Lock
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from hello_agents.tools import MCPTool
-
 from .amap_service import resolve_uvx
+from .mcp_client import MCPToolClient
 
 logger = logging.getLogger(__name__)
 
 
 def _image_results(value: Any) -> list[dict]:
-    """HelloAgents 会给 MCP 结果加文字前缀，兼容 JSON 和 Python 列表格式。"""
+    """Parse structured or text image results returned by the MCP server."""
     if isinstance(value, dict):
         if value.get("isError"):
             raise ValueError(str(value.get("content") or "DDGS 图片搜索失败"))
@@ -53,7 +52,7 @@ def _valid_image_url(value: Any) -> Optional[str]:
 
 
 class DDGSPhotoService:
-    def __init__(self, mcp_tool: Optional[MCPTool] = None):
+    def __init__(self, mcp_tool: Optional[MCPToolClient] = None):
         if mcp_tool is None:
             runtime_dir = Path(__file__).resolve().parents[2]
             tool_env = {
@@ -63,19 +62,14 @@ class DDGSPhotoService:
             }
             if os.getenv("DDGS_PROXY"):
                 tool_env["DDGS_PROXY"] = os.environ["DDGS_PROXY"]
-            mcp_tool = MCPTool(
-                name="ddgs-images",
-                description="DDGS MCP 景点图片搜索",
+            mcp_tool = MCPToolClient(
                 server_command=[
-                    resolve_uvx(), "--python", sys.executable,
+                    resolve_uvx(), "--offline", "--python", sys.executable,
                     "--from", "ddgs[mcp]==9.16.0", "ddgs", "mcp",
                 ],
                 env=tool_env,
-                auto_expand=True,
             )
-        available = {
-            item.get("name") for item in mcp_tool._available_tools if isinstance(item, dict)
-        }
+        available = set(mcp_tool.available_tools)
         if "search_images" not in available:
             raise RuntimeError("DDGS MCP 未发现 search_images 工具")
         self.mcp_tool = mcp_tool
@@ -83,16 +77,12 @@ class DDGSPhotoService:
         self._cache_lock = Lock()
 
     def _search_image(self, query: str) -> Optional[str]:
-        raw = self.mcp_tool.run({
-            "action": "call_tool",
-            "tool_name": "search_images",
-            "arguments": {
+        raw = self.mcp_tool.call_tool("search_images", {
                 "query": query,
                 "backend": "bing",
                 "region": "cn-zh",
                 "safesearch": "moderate",
                 "max_results": 5,
-            },
         })
         for item in _image_results(raw):
             # Bing thumbnails are served by its image CDN; source sites may block hotlinks.
@@ -108,7 +98,11 @@ class DDGSPhotoService:
             if query in self._cache:
                 return self._cache[query]
 
-        image_url = self._search_image(query)
+        try:
+            image_url = self._search_image(query)
+        except Exception as exc:
+            logger.warning("景点图片搜索不可用 (%s): %s", query, exc)
+            return None
         if image_url:
             with self._cache_lock:
                 self._cache[query] = image_url

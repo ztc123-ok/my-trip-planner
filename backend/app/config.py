@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """应用配置"""
 
     # 应用基本配置
-    app_name: str = "HelloAgents智能旅行助手"
+    app_name: str = "LangGraph智能旅行助手"
     app_version: str = "1.0.0"
     debug: bool = False
 
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # 高德地图API配置
     amap_api_key: str = ""
 
-    # LLM配置 (从环境变量读取,由HelloAgents管理)
+    # LLM配置 (由 OpenAI 兼容客户端读取)
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4"
@@ -63,7 +63,7 @@ def validate_config():
     if not settings.amap_api_key:
         errors.append("AMAP_API_KEY未配置")
 
-    # HelloAgentsLLM会自动从LLM_API_KEY读取,不强制要求OPENAI_API_KEY
+    # LLM_API_KEY 或 OPENAI_API_KEY 均可使用
     llm_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not llm_api_key:
         warnings.append("LLM_API_KEY或OPENAI_API_KEY未配置,LLM功能可能无法使用")
