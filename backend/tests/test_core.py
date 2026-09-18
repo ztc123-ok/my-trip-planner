@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +42,42 @@ def request(**overrides):
 
 
 class TripModelTests(unittest.TestCase):
+    def test_langgraph_runs_independent_queries_in_parallel_before_planning(self):
+        started = threading.Barrier(3)
+        finished = set()
+        finish_lock = threading.Lock()
+        test_case = self
+
+        def query(field, value):
+            def run(_agent, state):
+                test_case.assertEqual(state["request"].city, "北京")
+                started.wait(timeout=10)
+                with finish_lock:
+                    finished.add(field)
+                return {field: value}
+            return run
+
+        def plan(_agent, state):
+            test_case.assertEqual(finished, {"attraction_response", "weather_data", "hotel_response"})
+            test_case.assertEqual(state["attraction_response"], "景点")
+            test_case.assertEqual(state["weather_data"], [])
+            test_case.assertEqual(state["hotel_response"], "酒店")
+            return {"planner_response": "已汇总"}
+
+        def validate(_agent, state):
+            test_case.assertEqual(state["planner_response"], "已汇总")
+            return {"trip_plan": "已校验"}
+
+        with patch.object(MultiAgentTripPlanner, "_search_attractions", query("attraction_response", "景点")), \
+             patch.object(MultiAgentTripPlanner, "_get_weather", query("weather_data", [])), \
+             patch.object(MultiAgentTripPlanner, "_search_hotels", query("hotel_response", "酒店")), \
+             patch.object(MultiAgentTripPlanner, "_generate_plan", plan), \
+             patch.object(MultiAgentTripPlanner, "_validate_plan", validate):
+            planner = MultiAgentTripPlanner(llm=object(), amap_service=object())
+            result = planner.plan_trip(request())
+
+        self.assertEqual(result, "已校验")
+
     def test_qwen_planner_disables_default_thinking(self):
         qwen = unittest.mock.Mock(provider="qwen", model="qwen3.8-flash", timeout=60)
         self.assertEqual(planner_llm_options(qwen), {
@@ -93,17 +130,18 @@ class TripModelTests(unittest.TestCase):
         }
         llm = FakeLLM(json.dumps(plan_data, ensure_ascii=False))
         amap = unittest.mock.Mock()
-        amap.search_poi.side_effect = [
-            [POIInfo(id="1", name="故宫", type="景点", address="北京")],
-            [POIInfo(id="2", name="北京酒店", type="酒店", address="北京")],
-        ]
+        amap.search_poi.side_effect = lambda keywords, city: (
+            [POIInfo(id="2", name="北京酒店", type="酒店", address="北京")]
+            if keywords == "酒店" else
+            [POIInfo(id="1", name="故宫", type="景点", address="北京")]
+        )
         amap.get_weather.side_effect = ValueError("UNKNOWN_ERROR")
         planner = MultiAgentTripPlanner(llm=llm, amap_service=amap)
         with patch("app.services.weather_service.get_open_meteo_forecast", side_effect=ValueError("城市查询失败")):
             plan = planner.plan_trip(trip_request)
         self.assertEqual(plan.weather_info, [])
         self.assertIn("天气预报", plan.overall_suggestions)
-        self.assertEqual([call.args[0] for call in amap.search_poi.call_args_list], ["历史文化", "酒店"])
+        self.assertCountEqual([call.args[0] for call in amap.search_poi.call_args_list], ["历史文化", "酒店"])
         self.assertEqual(len(llm.calls), 3)
         self.assertEqual(llm.calls[-1][2]["extra_body"], {"enable_thinking": False})
         self.assertIn("planner", planner.graph.get_graph().nodes)

@@ -142,10 +142,9 @@ class MultiAgentTripPlanner:
         builder.add_node("hotels", self._search_hotels)
         builder.add_node("planner", self._generate_plan)
         builder.add_node("validate", self._validate_plan)
-        builder.add_edge(START, "attractions")
-        builder.add_edge("attractions", "weather")
-        builder.add_edge("weather", "hotels")
-        builder.add_edge("hotels", "planner")
+        for node in ("attractions", "weather", "hotels"):
+            builder.add_edge(START, node)
+        builder.add_edge(["attractions", "weather", "hotels"], "planner")
         builder.add_edge("planner", "validate")
         builder.add_edge("validate", END)
         self.graph = builder.compile()
@@ -159,7 +158,7 @@ class MultiAgentTripPlanner:
     def _search_attractions(self, state: TripGraphState) -> dict:
         request = state["request"]
         keywords = request.preferences[0] if request.preferences else "景点"
-        print("📍 步骤1: 搜索景点...")
+        print("📍 并行查询: 搜索景点...")
         pois = self.amap_service.search_poi(keywords, request.city)
         if not pois:
             raise ValueError(f"高德地图未找到 {request.city} 的{keywords}景点")
@@ -172,7 +171,7 @@ class MultiAgentTripPlanner:
 
     def _get_weather(self, state: TripGraphState) -> dict:
         request = state["request"]
-        print("🌤️  步骤2: 查询天气...")
+        print("🌤️  并行查询: 查询天气...")
         try:
             weather_data, weather_source = get_trip_forecast(
                 self.amap_service, request.city, request.start_date, request.end_date
@@ -203,7 +202,7 @@ class MultiAgentTripPlanner:
 
     def _search_hotels(self, state: TripGraphState) -> dict:
         request = state["request"]
-        print("🏨 步骤3: 搜索酒店...")
+        print("🏨 并行查询: 搜索酒店...")
         pois = self.amap_service.search_poi("酒店", request.city)
         if not pois:
             raise ValueError(f"高德地图未找到 {request.city} 的酒店")
@@ -216,7 +215,7 @@ class MultiAgentTripPlanner:
 
     def _generate_plan(self, state: TripGraphState) -> dict:
         request = state["request"]
-        print("📋 步骤4: 生成行程计划...")
+        print("📋 查询汇总完成，生成行程计划...")
         weather_data = state["weather_data"]
         verified_weather = (
             json.dumps([item.model_dump(mode="json") for item in weather_data], ensure_ascii=False)
@@ -231,7 +230,7 @@ class MultiAgentTripPlanner:
                 PLANNER_AGENT_PROMPT, query, **planner_llm_options(self.llm)
             )
         finally:
-            print(f"步骤4 模型调用耗时: {time.monotonic() - started:.1f} 秒")
+            print(f"规划模型调用耗时: {time.monotonic() - started:.1f} 秒")
         return {"planner_response": response}
 
     def _validate_plan(self, state: TripGraphState) -> dict:

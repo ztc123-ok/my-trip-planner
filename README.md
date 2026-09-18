@@ -11,7 +11,7 @@
 
 ## 工作流
 
-LangGraph 按「景点搜索 → 天气查询 → 酒店推荐 → 行程生成 → 结果校验」执行。景点、天气、酒店和图片继续使用原有的高德、Open-Meteo 与 DDGS MCP 数据源；行程接口及前端数据格式保持一致。模型通过 OpenAI 兼容接口连接，可沿用 `LLM_MODEL_ID`、`LLM_API_KEY`、`LLM_BASE_URL` 配置。
+LangGraph 从 `START` 并行执行景点搜索、天气查询和酒店推荐，等待三个节点全部完成后汇总到行程规划节点，最后校验结果。景点、天气、酒店和图片继续使用原有的高德、Open-Meteo 与 DDGS MCP 数据源；行程接口及前端数据格式保持一致。模型通过 OpenAI 兼容接口连接，可沿用 `LLM_MODEL_ID`、`LLM_API_KEY`、`LLM_BASE_URL` 配置。
 
 ## 运行
 
