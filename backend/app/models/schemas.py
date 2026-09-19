@@ -17,6 +17,7 @@ class TripRequest(BaseModel):
     accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    thread_id: Optional[str] = Field(default=None, description="可选会话ID，指定后将状态保存至该会话")
 
     @model_validator(mode="after")
     def validate_dates(self):
@@ -169,6 +170,7 @@ class TripPlanResponse(BaseModel):
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
+    thread_id: Optional[str] = Field(default=None, description="规划会话ID")
 
 
 class POIInfo(BaseModel):
@@ -248,4 +250,46 @@ class PlanConfirmRequest(BaseModel):
     selected_attractions: Optional[List[str]] = Field(default=None, description="用户选中的景点名称列表")
     selected_hotel: Optional[str] = Field(default=None, description="用户选中的酒店名称")
     user_feedback: Optional[str] = Field(default=None, description="用户额外调整要求或反馈")
+
+
+# ============ 状态持久化与历史回溯模型 ============
+
+class CheckpointSnapshot(BaseModel):
+    """单个检查点快照信息"""
+    checkpoint_id: str = Field(..., description="检查点ID")
+    parent_checkpoint_id: Optional[str] = Field(default=None, description="父检查点ID")
+    next_node: Optional[str] = Field(default=None, description="下一个待执行节点")
+    step: Optional[int] = Field(default=None, description="执行步骤序号")
+    source: Optional[str] = Field(default=None, description="写入来源节点/触发源")
+
+
+class TripStateData(BaseModel):
+    """会话当前状态数据"""
+    thread_id: str = Field(..., description="会话ID")
+    next_nodes: List[str] = Field(default=[], description="下一步待执行节点列表")
+    is_interrupted: bool = Field(default=False, description="是否处于中断挂起状态")
+    is_completed: bool = Field(default=False, description="是否已完成规划")
+    city: Optional[str] = Field(default=None, description="城市")
+    travel_days: Optional[int] = Field(default=None, description="天数")
+    has_plan: bool = Field(default=False, description="是否已生成最终计划")
+    candidate_attractions_count: int = Field(default=0, description="候选景点数量")
+    candidate_hotels_count: int = Field(default=0, description="候选酒店数量")
+    retry_count: int = Field(default=0, description="重试次数")
+
+
+class TripStateResponse(BaseModel):
+    """会话状态响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="获取会话状态成功", description="消息")
+    data: Optional[TripStateData] = Field(default=None, description="状态数据")
+
+
+class TripHistoryResponse(BaseModel):
+    """会话检查点历史响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="获取会话历史快照成功", description="消息")
+    thread_id: str = Field(..., description="会话ID")
+    total_checkpoints: int = Field(default=0, description="检查点总数")
+    history: List[CheckpointSnapshot] = Field(default=[], description="检查点时间线列表")
+
 

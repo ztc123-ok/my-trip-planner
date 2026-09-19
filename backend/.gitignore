@@ -1,3 +1,6 @@
 .uv-cache/
 .uv-tools/
 .uv-bin/
+*.db
+data/
+

@@ -129,3 +129,23 @@ export interface PlanConfirmRequest {
   user_feedback?: string
 }
 
+export interface TripStateData {
+  thread_id: string
+  next_nodes: string[]
+  is_interrupted: boolean
+  is_completed: boolean
+  city?: string
+  travel_days?: number
+  has_plan: boolean
+  candidate_attractions_count: number
+  candidate_hotels_count: number
+  retry_count: number
+}
+
+export interface TripStateResponse {
+  success: boolean
+  message: string
+  data?: TripStateData
+}
+
+

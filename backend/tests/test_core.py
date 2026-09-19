@@ -872,5 +872,196 @@ class ApiTests(unittest.TestCase):
         self.assertIsNone(format_nearest_attraction_distance(hotel_near_tiananmen, []))
 
 
+class CheckpointerTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.test_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.test_dir, "test_checkpoints.db")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_sqlite_persistence_and_resume_across_restarts(self):
+        """测试使用真实 SqliteSaver 跨实例/模拟服务重启断点续跑"""
+        from app.agents.checkpointer import create_checkpointer
+
+        fake_attractions = [POIInfo(id="p1", name="天安门", type="风景名胜", address="北京")]
+        fake_hotels = [POIInfo(id="h1", name="北京饭店", type="商务出行", address="王府井")]
+        valid_plan = json.dumps({
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "游览",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "hotel": {"name": "北京饭店", "address": "王府井", "location": {"longitude": 116.4, "latitude": 39.9}, "price_range": "500", "rating": "4.8", "distance": "1km", "type": "高档", "estimated_cost": 600},
+                "attractions": [{"name": "天安门", "address": "北京", "location": {"longitude": 116.4, "latitude": 39.9}, "visit_duration": 60, "description": "广场", "category": "景点", "ticket_price": 0}],
+                "meals": [
+                    {"type": "breakfast", "name": "早点", "description": "豆浆油条", "estimated_cost": 20},
+                    {"type": "lunch", "name": "炸酱面", "description": "老北京炸酱面", "estimated_cost": 40},
+                    {"type": "dinner", "name": "烤鸭", "description": "全聚德烤鸭", "estimated_cost": 150}
+                ]
+            }],
+            "weather_info": [],
+            "overall_suggestions": "祝旅途愉快",
+            "budget": {"total_attractions": 0, "total_hotels": 600, "total_meals": 210, "total_transportation": 50, "total": 860}
+        })
+
+        class FakeLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            def generate(self, system_prompt, user_prompt, **opts):
+                return valid_plan
+
+        # 实例 1：执行 prepare 挂起并持久化到 SQLite 文件
+        saver1 = create_checkpointer("sqlite", self.db_path)
+        planner1 = MultiAgentTripPlanner(llm=FakeLLM(), amap_service=AmapService(mcp_tool=FakeMCP({})), checkpointer=saver1)
+        with patch.object(planner1.amap_service, "search_poi", side_effect=[fake_attractions, fake_hotels]), \
+             patch("app.agents.trip_planner_agent.get_trip_forecast", return_value=([], "")):
+            prep = planner1.prepare_trip_plan(request(city="北京", travel_days=1, end_date="2026-10-01"))
+
+        thread_id = prep["thread_id"]
+        # 关闭实例 1 连接，模拟应用进程退出
+        if hasattr(saver1, "conn"):
+            saver1.conn.close()
+        del planner1
+        del saver1
+
+        # 检查 SQLite 文件确实被创建且有数据
+        self.assertTrue(os.path.exists(self.db_path))
+        self.assertGreater(os.path.getsize(self.db_path), 0)
+
+        # 实例 2：模拟重启后新建实例连接同一个 SQLite 文件
+        saver2 = create_checkpointer("sqlite", self.db_path)
+        planner2 = MultiAgentTripPlanner(llm=FakeLLM(), amap_service=AmapService(mcp_tool=FakeMCP({})), checkpointer=saver2)
+
+        # 验证重启后能正确恢复状态快照
+        state = planner2.get_trip_state(thread_id)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["thread_id"], thread_id)
+        self.assertEqual(state["city"], "北京")
+        self.assertTrue(state["is_interrupted"])
+        self.assertIn("planner", state["next_nodes"])
+
+        # 验证重启后能顺利 resume 规划
+        plan = planner2.resume_trip_plan(
+            thread_id=thread_id,
+            selected_attractions=["天安门"],
+            selected_hotel="北京饭店",
+            user_feedback="无"
+        )
+        self.assertEqual(plan.city, "北京")
+
+        # 验证完成后状态已更新
+        state_after = planner2.get_trip_state(thread_id)
+        self.assertTrue(state_after["is_completed"])
+        self.assertTrue(state_after["has_plan"])
+
+        # 验证历史回溯
+        history = planner2.get_trip_history(thread_id)
+        self.assertGreater(len(history), 2)
+        for snap in history:
+            self.assertIn("checkpoint_id", snap)
+
+        if hasattr(saver2, "conn"):
+            saver2.conn.close()
+
+    def test_plan_trip_persists_checkpoints(self):
+        """测试常规一键规划也写入检查点并记录历史"""
+        from app.agents.checkpointer import create_checkpointer
+
+        valid_plan = json.dumps({
+            "city": "北京", "start_date": "2026-10-01", "end_date": "2026-10-01",
+            "days": [{
+                "date": "2026-10-01", "day_index": 0, "description": "游览",
+                "transportation": "公共交通", "accommodation": "经济型酒店",
+                "hotel": {"name": "北京饭店", "address": "王府井", "location": {"longitude": 116.4, "latitude": 39.9}, "price_range": "500", "rating": "4.8", "distance": "1km", "type": "高档", "estimated_cost": 600},
+                "attractions": [{"name": "天安门", "address": "北京", "location": {"longitude": 116.4, "latitude": 39.9}, "visit_duration": 60, "description": "广场", "category": "景点", "ticket_price": 0}],
+                "meals": [
+                    {"type": "breakfast", "name": "早点", "description": "豆浆油条", "estimated_cost": 20},
+                    {"type": "lunch", "name": "炸酱面", "description": "老北京炸酱面", "estimated_cost": 40},
+                    {"type": "dinner", "name": "烤鸭", "description": "全聚德烤鸭", "estimated_cost": 150}
+                ]
+            }],
+            "weather_info": [],
+            "overall_suggestions": "祝旅途愉快",
+            "budget": {"total_attractions": 0, "total_hotels": 600, "total_meals": 210, "total_transportation": 50, "total": 860}
+        })
+        class FakeLLM:
+            provider = "other"
+            model = "test"
+            timeout = 60
+            def generate(self, *a, **k):
+                return valid_plan
+
+        saver = create_checkpointer("sqlite", self.db_path)
+        planner = MultiAgentTripPlanner(llm=FakeLLM(), amap_service=AmapService(mcp_tool=FakeMCP({})), checkpointer=saver)
+        with patch.object(planner.amap_service, "search_poi", return_value=[POIInfo(id="1", name="天安门", type="风景", address="北京")]), \
+             patch("app.agents.trip_planner_agent.get_trip_forecast", return_value=([], "")):
+            plan = planner.plan_trip(request(city="北京", travel_days=1, end_date="2026-10-01"), thread_id="plan_thread_999")
+
+        self.assertEqual(plan.city, "北京")
+        state = planner.get_trip_state("plan_thread_999")
+        self.assertIsNotNone(state)
+        self.assertTrue(state["is_completed"])
+        history = planner.get_trip_history("plan_thread_999")
+        self.assertGreater(len(history), 0)
+
+        if hasattr(saver, "conn"):
+            saver.conn.close()
+
+    def test_state_and_history_api_endpoints(self):
+        """测试 GET /api/trip/plan/state 和 /api/trip/plan/history 接口"""
+        client = TestClient(api_app)
+
+        class FakeAgent:
+            def get_trip_state(self, tid):
+                if tid == "exist_123":
+                    return {
+                        "thread_id": "exist_123",
+                        "next_nodes": ["planner"],
+                        "is_interrupted": True,
+                        "is_completed": False,
+                        "city": "北京",
+                        "travel_days": 2,
+                        "has_plan": False,
+                        "candidate_attractions_count": 5,
+                        "candidate_hotels_count": 3,
+                        "retry_count": 0,
+                    }
+                return None
+
+            def get_trip_history(self, tid):
+                if tid == "exist_123":
+                    return [
+                        {"checkpoint_id": "c1", "parent_checkpoint_id": None, "next_node": "planner", "step": 1, "source": "loop"}
+                    ]
+                return []
+
+        with patch("app.api.routes.trip.get_trip_planner_agent", return_value=FakeAgent()):
+            # 存在状态
+            res = client.get("/api/trip/plan/state/exist_123")
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertTrue(data["success"])
+            self.assertEqual(data["data"]["city"], "北京")
+            self.assertTrue(data["data"]["is_interrupted"])
+
+            # 不存在状态 404
+            res404 = client.get("/api/trip/plan/state/not_found")
+            self.assertEqual(res404.status_code, 404)
+
+            # 存在历史
+            res_hist = client.get("/api/trip/plan/history/exist_123")
+            self.assertEqual(res_hist.status_code, 200)
+            hist_data = res_hist.json()
+            self.assertTrue(hist_data["success"])
+            self.assertEqual(hist_data["total_checkpoints"], 1)
+
+            # 不存在历史 404
+            res_hist404 = client.get("/api/trip/plan/history/not_found")
+            self.assertEqual(res_hist404.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

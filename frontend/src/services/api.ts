@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse, PlanCandidateResponse, PlanConfirmRequest } from '@/types'
+import type { TripFormData, TripPlanResponse, PlanCandidateResponse, PlanConfirmRequest, TripStateResponse } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -73,6 +73,20 @@ export async function confirmTripPlan(confirmData: PlanConfirmRequest): Promise<
     throw new Error(error.response?.data?.detail || error.message || '确认旅行计划失败')
   }
 }
+
+/**
+ * 查询旅行规划会话状态（支持断点检测与恢复）
+ */
+export async function getTripPlanState(threadId: string): Promise<TripStateResponse> {
+  try {
+    const response = await apiClient.get<TripStateResponse>(`/api/trip/plan/state/${threadId}`)
+    return response.data
+  } catch (error: any) {
+    console.error('获取规划状态失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '获取规划状态失败')
+  }
+}
+
 
 
 /**

@@ -7,8 +7,10 @@ import time
 import uuid
 from typing import TypedDict, Literal, Optional
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from .checkpointer import get_checkpointer
 
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
@@ -199,7 +201,7 @@ class MultiAgentTripPlanner:
             amap_service if amap_service is not None
             else AmapService(mcp_tool=create_amap_tool(settings.amap_api_key))
         )
-        self.checkpointer = checkpointer if checkpointer is not None else MemorySaver()
+        self.checkpointer = checkpointer if checkpointer is not None else get_checkpointer()
 
         builder = StateGraph(TripGraphState)
         builder.add_node("attractions", self._search_attractions)
@@ -213,8 +215,8 @@ class MultiAgentTripPlanner:
         builder.add_edge("planner", "validate")
         builder.add_conditional_edges("validate", _should_retry)
 
-        # 基础图：无中断，用于一键式调用及既有兼容
-        self.graph = builder.compile()
+        # 基础图：无中断，用于一键式调用及既有兼容，保存执行检查点
+        self.graph = builder.compile(checkpointer=self.checkpointer)
 
         # Human-in-the-Loop 图：在 planner 节点前设置中断点，保存状态检查点
         self.graph_hitl = builder.compile(
@@ -222,10 +224,12 @@ class MultiAgentTripPlanner:
             interrupt_before=["planner"]
         )
 
-    def plan_trip(self, request: TripRequest) -> TripPlan:
-        """一键全自动生成旅行计划（无中断模式）。"""
-        print(f"🚀 LangGraph 开始规划 {request.city} 的 {request.travel_days} 天行程")
-        result = self.graph.invoke({"request": request})
+    def plan_trip(self, request: TripRequest, thread_id: str | None = None) -> TripPlan:
+        """一键全自动生成旅行计划（无中断模式，保存执行状态至检查点）。"""
+        tid = thread_id or getattr(request, "thread_id", None) or f"trip_{uuid.uuid4().hex[:12]}"
+        config = {"configurable": {"thread_id": tid}}
+        print(f"🚀 LangGraph 开始规划 {request.city} 的 {request.travel_days} 天行程 (thread_id={tid})")
+        result = self.graph.invoke({"request": request}, config=config)
         print("✅ LangGraph 旅行计划生成完成")
         return result["trip_plan"]
 
@@ -293,6 +297,79 @@ class MultiAgentTripPlanner:
             raise ValueError(f"会话 {thread_id} 恢复规划后未生成有效旅行计划")
         print("✅ LangGraph HITL 旅行计划生成完成")
         return plan
+
+    def get_trip_state(self, thread_id: str) -> dict | None:
+        """获取指定会话当前的图执行状态与中间数据。"""
+        config = {"configurable": {"thread_id": thread_id}}
+        state = self.graph_hitl.get_state(config)
+        if not state or not state.config or not state.config.get("configurable", {}).get("checkpoint_id"):
+            state = self.graph.get_state(config)
+            if not state or not state.config or not state.config.get("configurable", {}).get("checkpoint_id"):
+                return None
+
+        values = state.values or {}
+        req = values.get("request")
+        city = req.city if hasattr(req, "city") else (req.get("city") if isinstance(req, dict) else None)
+        travel_days = req.travel_days if hasattr(req, "travel_days") else (req.get("travel_days") if isinstance(req, dict) else None)
+        candidate_attractions = values.get("candidate_attractions", [])
+        candidate_hotels = values.get("candidate_hotels", [])
+        trip_plan = values.get("trip_plan")
+        next_nodes = list(state.next) if state.next else []
+
+        return {
+            "thread_id": thread_id,
+            "next_nodes": next_nodes,
+            "is_interrupted": bool(next_nodes),
+            "is_completed": bool(trip_plan is not None or not next_nodes),
+            "city": city,
+            "travel_days": travel_days,
+            "has_plan": trip_plan is not None,
+            "candidate_attractions_count": len(candidate_attractions),
+            "candidate_hotels_count": len(candidate_hotels),
+            "retry_count": values.get("retry_count", 0),
+        }
+
+    def get_trip_history(self, thread_id: str) -> list[dict]:
+        """获取指定会话的检查点演进历史列表（按时间正序）。"""
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshots = []
+        for state in self.graph_hitl.get_state_history(config):
+            cfg = state.config.get("configurable", {})
+            cid = cfg.get("checkpoint_id", "")
+            if not cid:
+                continue
+            parent_cfg = (state.parent_config or {}).get("configurable", {})
+            parent_cid = parent_cfg.get("checkpoint_id")
+            meta = state.metadata or {}
+            next_node = state.next[0] if state.next else None
+            snapshots.append({
+                "checkpoint_id": cid,
+                "parent_checkpoint_id": parent_cid,
+                "next_node": next_node,
+                "step": meta.get("step"),
+                "source": meta.get("source"),
+            })
+
+        if not snapshots:
+            for state in self.graph.get_state_history(config):
+                cfg = state.config.get("configurable", {})
+                cid = cfg.get("checkpoint_id", "")
+                if not cid:
+                    continue
+                parent_cfg = (state.parent_config or {}).get("configurable", {})
+                parent_cid = parent_cfg.get("checkpoint_id")
+                meta = state.metadata or {}
+                next_node = state.next[0] if state.next else None
+                snapshots.append({
+                    "checkpoint_id": cid,
+                    "parent_checkpoint_id": parent_cid,
+                    "next_node": next_node,
+                    "step": meta.get("step"),
+                    "source": meta.get("source"),
+                })
+
+        return list(reversed(snapshots))
+
 
 
     def _search_attractions(self, state: TripGraphState) -> dict:

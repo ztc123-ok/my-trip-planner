@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # 日志配置
     log_level: str = "INFO"
 
+    # LangGraph 状态持久化配置
+    checkpointer_type: str = "sqlite"  # 支持 "sqlite" 或 "memory"
+    sqlite_db_path: str = "data/trip_checkpoints.db"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

@@ -289,10 +289,10 @@
 
 
 <script setup lang="ts">
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
-import { generateTripPlan, prepareTripPlan, confirmTripPlan } from '@/services/api'
+import { message, Modal } from 'ant-design-vue'
+import { generateTripPlan, prepareTripPlan, confirmTripPlan, getTripPlanState } from '@/services/api'
 import type { TripFormData, PlanCandidateData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
@@ -309,6 +309,102 @@ const candidateData = ref<PlanCandidateData | null>(null)
 const selectedAttractions = ref<string[]>([])
 const selectedHotel = ref<string | undefined>(undefined)
 const userFeedback = ref('')
+
+// LocalStorage 状态持久化键名
+const STORAGE_KEY_THREAD = 'pending_trip_thread_id'
+const STORAGE_KEY_CANDIDATES = 'pending_trip_candidate_data'
+const STORAGE_KEY_SELECTED_ATTRS = 'pending_trip_selected_attractions'
+const STORAGE_KEY_SELECTED_HOTEL = 'pending_trip_selected_hotel'
+const STORAGE_KEY_FEEDBACK = 'pending_trip_user_feedback'
+
+const savePendingStorage = (data: PlanCandidateData) => {
+  localStorage.setItem(STORAGE_KEY_THREAD, data.thread_id)
+  localStorage.setItem(STORAGE_KEY_CANDIDATES, JSON.stringify(data))
+  localStorage.setItem(STORAGE_KEY_SELECTED_ATTRS, JSON.stringify(selectedAttractions.value))
+  if (selectedHotel.value) {
+    localStorage.setItem(STORAGE_KEY_SELECTED_HOTEL, selectedHotel.value)
+  }
+  if (userFeedback.value) {
+    localStorage.setItem(STORAGE_KEY_FEEDBACK, userFeedback.value)
+  }
+}
+
+const clearPendingStorage = () => {
+  localStorage.removeItem(STORAGE_KEY_THREAD)
+  localStorage.removeItem(STORAGE_KEY_CANDIDATES)
+  localStorage.removeItem(STORAGE_KEY_SELECTED_ATTRS)
+  localStorage.removeItem(STORAGE_KEY_SELECTED_HOTEL)
+  localStorage.removeItem(STORAGE_KEY_FEEDBACK)
+}
+
+// 页面加载时检测未完成的挂起规划
+onMounted(async () => {
+  const savedThreadId = localStorage.getItem(STORAGE_KEY_THREAD)
+  const savedCandidatesStr = localStorage.getItem(STORAGE_KEY_CANDIDATES)
+
+  if (savedThreadId && savedCandidatesStr) {
+    try {
+      const stateRes = await getTripPlanState(savedThreadId)
+      if (stateRes.success && stateRes.data && stateRes.data.is_interrupted && !stateRes.data.is_completed) {
+        const parsedCandidates: PlanCandidateData = JSON.parse(savedCandidatesStr)
+        const city = stateRes.data.city || parsedCandidates.city || '目的地'
+        const days = stateRes.data.travel_days || parsedCandidates.travel_days || 1
+
+        Modal.confirm({
+          title: '发现未完成的旅行规划',
+          content: `检测到您之前有正在规划中的【${city}】${days}天行程，是否恢复断点继续挑选？`,
+          okText: '恢复规划',
+          cancelText: '放弃并新建',
+          onOk() {
+            candidateData.value = parsedCandidates
+            enableHitl.value = true
+            const savedAttrs = localStorage.getItem(STORAGE_KEY_SELECTED_ATTRS)
+            if (savedAttrs) {
+              try {
+                selectedAttractions.value = JSON.parse(savedAttrs)
+              } catch {
+                selectedAttractions.value = parsedCandidates.candidate_attractions.map(a => a.name)
+              }
+            } else {
+              selectedAttractions.value = parsedCandidates.candidate_attractions.map(a => a.name)
+            }
+            selectedHotel.value = localStorage.getItem(STORAGE_KEY_SELECTED_HOTEL) || (parsedCandidates.candidate_hotels.length > 0 ? parsedCandidates.candidate_hotels[0].name : undefined)
+            userFeedback.value = localStorage.getItem(STORAGE_KEY_FEEDBACK) || ''
+            hitlModalVisible.value = true
+            message.success('已恢复上次未完成的规划现场！')
+          },
+          onCancel() {
+            clearPendingStorage()
+          }
+        })
+      } else {
+        clearPendingStorage()
+      }
+    } catch (e) {
+      console.warn('检查未完成规划失败，清理失效缓存', e)
+      clearPendingStorage()
+    }
+  }
+})
+
+// 监听用户弹窗中的挑选，实时同步到 LocalStorage
+watch(selectedAttractions, (val) => {
+  if (hitlModalVisible.value && candidateData.value) {
+    localStorage.setItem(STORAGE_KEY_SELECTED_ATTRS, JSON.stringify(val))
+  }
+}, { deep: true })
+
+watch(selectedHotel, (val) => {
+  if (hitlModalVisible.value && candidateData.value && val) {
+    localStorage.setItem(STORAGE_KEY_SELECTED_HOTEL, val)
+  }
+})
+
+watch(userFeedback, (val) => {
+  if (hitlModalVisible.value && candidateData.value) {
+    localStorage.setItem(STORAGE_KEY_FEEDBACK, val)
+  }
+})
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -395,6 +491,7 @@ const handleSubmit = async () => {
         selectedAttractions.value = response.data.candidate_attractions.map(a => a.name)
         selectedHotel.value = response.data.candidate_hotels.length > 0 ? response.data.candidate_hotels[0].name : undefined
         userFeedback.value = ''
+        savePendingStorage(response.data)
         hitlModalVisible.value = true
         message.info('候选景点与酒店已检索完成，请在弹窗中挑选确认！')
       } else {
@@ -444,6 +541,7 @@ const handleConfirmHitl = async () => {
       user_feedback: userFeedback.value
     })
     if (response.success && response.data) {
+      clearPendingStorage()
       sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
       message.success('人机协同行程规划完成!')
       hitlModalVisible.value = false
@@ -463,6 +561,7 @@ const handleConfirmHitl = async () => {
 const handleCancelHitl = () => {
   hitlModalVisible.value = false
   candidateData.value = null
+  clearPendingStorage()
   message.info('已取消本次人机协同规划')
 }
 </script>

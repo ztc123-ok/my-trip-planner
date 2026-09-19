@@ -1,5 +1,6 @@
 """旅行规划API路由"""
 
+import uuid
 from fastapi import APIRouter, HTTPException
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
@@ -9,6 +10,10 @@ from ...models.schemas import (
     PlanCandidateResponse,
     PlanCandidateData,
     PlanConfirmRequest,
+    TripStateResponse,
+    TripStateData,
+    TripHistoryResponse,
+    CheckpointSnapshot,
 )
 from ...agents.trip_planner_agent import get_trip_planner_agent
 
@@ -39,20 +44,29 @@ async def plan_trip(request: TripRequest):
         print(f"   天数: {request.travel_days}")
         print(f"{'='*60}\n")
 
+        tid = request.thread_id or f"trip_{uuid.uuid4().hex[:12]}"
+        request.thread_id = tid
+
         # 获取Agent实例
         print("🔄 获取多智能体系统实例...")
         agent = await run_in_threadpool(get_trip_planner_agent)
 
         # 生成旅行计划
-        print("🚀 开始生成旅行计划...")
-        trip_plan = await run_in_threadpool(agent.plan_trip, request)
+        print(f"🚀 开始生成旅行计划 (thread_id={tid})...")
+        import inspect
+        sig = inspect.signature(agent.plan_trip)
+        if "thread_id" in sig.parameters or any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+            trip_plan = await run_in_threadpool(agent.plan_trip, request, thread_id=tid)
+        else:
+            trip_plan = await run_in_threadpool(agent.plan_trip, request)
 
         print("✅ 旅行计划生成成功,准备返回响应\n")
 
         return TripPlanResponse(
             success=True,
             message="旅行计划生成成功",
-            data=trip_plan
+            data=trip_plan,
+            thread_id=tid
         )
 
     except Exception as e:
@@ -124,13 +138,66 @@ async def confirm_trip_plan(request: PlanConfirmRequest):
         return TripPlanResponse(
             success=True,
             message="旅行计划生成成功（已融入用户确认要求）",
-            data=trip_plan
+            data=trip_plan,
+            thread_id=request.thread_id
         )
     except Exception as e:
         print(f"❌ HITL 确认恢复旅行计划失败: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"生成旅行计划失败: {str(e)}")
+
+
+@router.get(
+    "/plan/state/{thread_id}",
+    response_model=TripStateResponse,
+    summary="查询规划会话状态",
+    description="查询指定 thread_id 的当前图执行状态、待执行节点与中间数据"
+)
+async def get_plan_state(thread_id: str):
+    """查询指定会话状态"""
+    try:
+        agent = await run_in_threadpool(get_trip_planner_agent)
+        state_data = await run_in_threadpool(agent.get_trip_state, thread_id)
+        if not state_data:
+            raise HTTPException(status_code=404, detail=f"未找到会话 {thread_id} 的状态快照")
+        return TripStateResponse(
+            success=True,
+            message="获取会话状态成功",
+            data=TripStateData(**state_data)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询会话状态失败: {str(e)}")
+
+
+@router.get(
+    "/plan/history/{thread_id}",
+    response_model=TripHistoryResponse,
+    summary="查询规划会话历史快照",
+    description="查询指定 thread_id 的所有检查点时间线历史，支持执行追踪与历史回溯"
+)
+async def get_plan_history(thread_id: str):
+    """查询指定会话检查点演进历史"""
+    try:
+        agent = await run_in_threadpool(get_trip_planner_agent)
+        history = await run_in_threadpool(agent.get_trip_history, thread_id)
+        if not history:
+            raise HTTPException(status_code=404, detail=f"未找到会话 {thread_id} 的检查点历史")
+        snapshots = [CheckpointSnapshot(**item) for item in history]
+        return TripHistoryResponse(
+            success=True,
+            message="获取会话历史快照成功",
+            thread_id=thread_id,
+            total_checkpoints=len(snapshots),
+            history=snapshots
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询会话历史失败: {str(e)}")
+
 
 
 
