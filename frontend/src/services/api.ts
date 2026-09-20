@@ -1,5 +1,14 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse, PlanCandidateResponse, PlanConfirmRequest, TripStateResponse } from '@/types'
+import type {
+  TripFormData,
+  TripPlanResponse,
+  PlanCandidateResponse,
+  PlanConfirmRequest,
+  TripStateResponse,
+  StreamEvent,
+  ChatModifyRequest,
+  ChatModifyResponse,
+} from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -87,7 +96,102 @@ export async function getTripPlanState(threadId: string): Promise<TripStateRespo
   }
 }
 
+/**
+ * 流式生成旅行计划 (SSE Fetch 读取器)
+ */
+export async function generateTripPlanStream(
+  formData: TripFormData,
+  onEvent: (event: StreamEvent) => void,
+  onError?: (err: any) => void
+): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/trip/plan/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(formData),
+    })
 
+    if (!response.ok || !response.body) {
+      throw new Error(`流式连接失败: HTTP ${response.status}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/(?:\r?\n){2}/)
+      buffer = lines.pop() || ''
+
+      for (const block of lines) {
+        if (!block.trim()) continue
+        const blockLines = block.split(/\r?\n/)
+        let eventName = 'message'
+        let dataStr = ''
+
+        for (const rawLine of blockLines) {
+          const line = rawLine.trim()
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim()
+          } else if (line.startsWith('data:')) {
+            dataStr = line.slice(5).trim()
+          }
+        }
+
+        if (dataStr) {
+          try {
+            const parsedData = JSON.parse(dataStr)
+            onEvent({
+              event: eventName,
+              ...parsedData,
+            })
+          } catch (e) {
+            console.warn('解析 SSE 数据块异常:', e, dataStr)
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('SSE 流式传输异常:', err)
+    if (onError) {
+      onError(err)
+    } else {
+      throw err
+    }
+  }
+}
+
+/**
+ * 对话式修改行程计划 (调用后端 LangGraph chat_modify 子图)
+ */
+export async function chatModifyTripPlan(requestData: ChatModifyRequest): Promise<ChatModifyResponse> {
+  try {
+    const response = await apiClient.post<ChatModifyResponse>('/api/trip/chat/modify', requestData)
+    return response.data
+  } catch (error: any) {
+    console.error('对话修改行程失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '对话修改行程失败')
+  }
+}
+
+/**
+ * 自然语言旅行意图提取
+ */
+export async function parseNaturalLanguageTrip(text: string): Promise<TripFormData> {
+  try {
+    const response = await apiClient.post<{ success: boolean; data: TripFormData }>('/api/trip/chat/parse', { text })
+    return response.data.data
+  } catch (error: any) {
+    console.error('自然语言意图提取失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '意图提取失败')
+  }
+}
 
 /**
  * 健康检查
@@ -108,3 +212,4 @@ export async function getAttractionPhoto(name: string, city: string): Promise<st
 }
 
 export default apiClient
+

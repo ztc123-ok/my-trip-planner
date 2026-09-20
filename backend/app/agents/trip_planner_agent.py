@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """LangGraph 多角色旅行规划工作流。"""
 
+import asyncio
 import json
 import math
+import re
+import threading
 import time
 import uuid
 from typing import TypedDict, Literal, Optional
+
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -232,6 +236,297 @@ class MultiAgentTripPlanner:
         result = self.graph.invoke({"request": request}, config=config)
         print("✅ LangGraph 旅行计划生成完成")
         return result["trip_plan"]
+
+    async def astream_plan_trip(self, request: TripRequest, thread_id: str | None = None):
+        """流式运行多智能体图 (SSE)，逐个节点产生更新事件。
+        
+        通过后台工作线程执行同步图的 stream 方法，利用 asyncio.Queue 实现
+        跨线程向异步生成器逐个推送事件。这样既支持 SqliteSaver 持久化（避免 SqliteSaver
+        不支持 astream 的 NotImplementedError 限制），又保证 FastAPI 事件循环不被阻塞。
+        """
+        tid = thread_id or getattr(request, "thread_id", None) or f"trip_{uuid.uuid4().hex[:12]}"
+        config = {"configurable": {"thread_id": tid}}
+        print(f">> [Stream] LangGraph 开始流式规划 {request.city} 的 {request.travel_days} 天行程 (thread_id={tid})")
+
+        start_time = time.time()
+        yield {
+            "event": "start",
+            "thread_id": tid,
+            "progress": 5,
+            "elapsed_seconds": 0.0,
+            "message": f"开始为 {request.city} 规划 {request.travel_days} 天行程...",
+            "data": {
+                "city": request.city,
+                "travel_days": request.travel_days,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+            }
+        }
+
+        final_plan = None
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def _run_stream_worker():
+            try:
+                for chunk in self.graph.stream({"request": request}, config=config, stream_mode="updates"):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+                state = self.graph.get_state(config)
+                saved_plan = state.values.get("trip_plan") if hasattr(state, "values") else None
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", saved_plan))
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+
+        worker_thread = threading.Thread(target=_run_stream_worker, daemon=True)
+        worker_thread.start()
+
+        # 跟踪并行搜索完成状态与候选情报
+        collected_attractions = []
+        collected_weather = []
+        collected_hotels = []
+        parallel_nodes_done = set()
+        planner_started = False
+        planner_finished = False
+
+        # 规划耗时阶段细粒度推进序列
+        planner_substeps = [
+            ("动线拓扑建模", "基于高德经纬度分析景点空间拓扑网络，测算景点间地表通勤距离...", 74),
+            ("游览节奏规划", "测算各景区建议游览时长与通行缓冲窗口，按上下午合理编排...", 78),
+            ("餐饮美食匹配", "结合游览动线搜寻周边地道特色美食，匹配早中晚餐标...", 81),
+            ("住宿接驳联运", "测算每日末尾景点至候选酒店的最佳交通动线与接驳方案...", 84),
+            ("多维预算精算", "综合门票价格、交通出行、餐饮标准与酒店费用精算总体预算...", 87),
+            ("防疲劳与规则校验", "校验每日游玩闭环与开放时段，生成个性化出行贴士与避坑指南...", 89),
+            ("方案终稿组装", "正在组织结构化旅行计划与每日详尽行程说明...", 91),
+        ]
+        substep_idx = 0
+
+        try:
+            while True:
+                try:
+                    # 使用 4.5 秒超时轮询，在 LLM 生成大 JSON 的漫长等待周期内持续输出阶段性演进
+                    msg_type, payload = await asyncio.wait_for(queue.get(), timeout=4.5)
+                except asyncio.TimeoutError:
+                    # 如果前置三专家已完成，且 planner 尚未结束，动态广播推演进度
+                    if len(parallel_nodes_done) >= 3 and not planner_finished:
+                        if not planner_started:
+                            planner_started = True
+                            poi_names = [p.name for p in collected_attractions[:3]]
+                            poi_desc = "、".join(poi_names) if poi_names else "精选核心地标"
+                            yield {
+                                "event": "node_start",
+                                "node": "planner",
+                                "name": "行程规划专家",
+                                "status": "running",
+                                "stage": "情报汇集建模",
+                                "progress": 72,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已锁定 {len(collected_attractions)} 个景点({poi_desc}等)、{len(collected_weather)} 天天气预报，进入多维时空规划模型...",
+                                "data": {
+                                    "attractions_count": len(collected_attractions),
+                                    "weather_count": len(collected_weather),
+                                    "hotels_count": len(collected_hotels),
+                                }
+                            }
+                        elif substep_idx < len(planner_substeps):
+                            stage_name, stage_desc, stage_prog = planner_substeps[substep_idx]
+                            yield {
+                                "event": "node_progress",
+                                "node": "planner",
+                                "name": "行程规划专家",
+                                "status": "running",
+                                "stage": stage_name,
+                                "progress": stage_prog,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": stage_desc,
+                                "data": {
+                                    "stage_name": stage_name,
+                                    "step": substep_idx + 1,
+                                    "total_steps": len(planner_substeps),
+                                }
+                            }
+                            if substep_idx < len(planner_substeps) - 1:
+                                substep_idx += 1
+                    continue
+
+                if msg_type == "chunk":
+                    chunk = payload
+                    for node_name, node_output in chunk.items():
+                        if node_name == "attractions":
+                            pois = node_output.get("candidate_attractions", [])
+                            collected_attractions = pois
+                            parallel_nodes_done.add("attractions")
+                            poi_samples = [
+                                p.model_dump(mode="json") if hasattr(p, "model_dump") else p
+                                for p in pois[:4]
+                            ]
+                            yield {
+                                "event": "node_finish",
+                                "node": "attractions",
+                                "name": "景点搜索专家",
+                                "status": "completed",
+                                "stage": "景点挖掘检索",
+                                "progress": 30,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已检索并整理 {len(pois)} 个热门景点",
+                                "data": {
+                                    "count": len(pois),
+                                    "samples": poi_samples,
+                                }
+                            }
+                        elif node_name == "weather":
+                            w_data = node_output.get("weather_data", [])
+                            collected_weather = w_data
+                            parallel_nodes_done.add("weather")
+                            source = node_output.get("weather_source", "")
+                            w_samples = [
+                                w.model_dump(mode="json") if hasattr(w, "model_dump") else w
+                                for w in w_data
+                            ]
+                            yield {
+                                "event": "node_finish",
+                                "node": "weather",
+                                "name": "天气查询专家",
+                                "status": "completed",
+                                "stage": "气象环境锁定",
+                                "progress": 50,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已获取 {len(w_data)} 天天气预报 ({source or '实时气象'})",
+                                "data": {
+                                    "count": len(w_data),
+                                    "source": source,
+                                    "samples": w_samples,
+                                }
+                            }
+                        elif node_name == "hotels":
+                            hotels = node_output.get("candidate_hotels", [])
+                            collected_hotels = hotels
+                            parallel_nodes_done.add("hotels")
+                            hotel_samples = [
+                                h.model_dump(mode="json") if hasattr(h, "model_dump") else h
+                                for h in hotels[:4]
+                            ]
+                            yield {
+                                "event": "node_finish",
+                                "node": "hotels",
+                                "name": "酒店推荐专家",
+                                "status": "completed",
+                                "stage": "优质住宿匹配",
+                                "progress": 70,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已筛选匹配 {len(hotels)} 家高分住宿",
+                                "data": {
+                                    "count": len(hotels),
+                                    "samples": hotel_samples,
+                                }
+                            }
+
+                        # 若 3 个前置节点刚集齐，立刻触发 planner 启动事件
+                        if len(parallel_nodes_done) >= 3 and not planner_started:
+                            planner_started = True
+                            poi_names = [p.name for p in collected_attractions[:3]]
+                            poi_desc = "、".join(poi_names) if poi_names else "精选地标"
+                            yield {
+                                "event": "node_start",
+                                "node": "planner",
+                                "name": "行程规划专家",
+                                "status": "running",
+                                "stage": "情报汇集建模",
+                                "progress": 72,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已锁定 {len(collected_attractions)} 个景点({poi_desc}等)、{len(collected_weather)} 天天气预报，进入多维时空规划模型...",
+                                "data": {
+                                    "attractions_count": len(collected_attractions),
+                                    "weather_count": len(collected_weather),
+                                    "hotels_count": len(collected_hotels),
+                                }
+                            }
+
+                        if node_name == "planner":
+                            planner_finished = True
+                            yield {
+                                "event": "node_finish",
+                                "node": "planner",
+                                "name": "行程规划专家",
+                                "status": "completed",
+                                "stage": "时空动线与预算完成",
+                                "progress": 93,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": "已完成每日行程动线、交通与预算测算，进入质量校验",
+                                "data": {}
+                            }
+                        elif node_name == "validate":
+                            plan = node_output.get("trip_plan")
+                            if plan is not None:
+                                final_plan = plan
+                                yield {
+                                    "event": "node_finish",
+                                    "node": "validate",
+                                    "name": "质量校验专家",
+                                    "status": "completed",
+                                    "stage": "质量闭环通过",
+                                    "progress": 98,
+                                    "elapsed_seconds": round(time.time() - start_time, 1),
+                                    "message": "旅行计划校验通过，所有指标完备，即将呈现！",
+                                    "data": {}
+                                }
+                            else:
+                                retry_cnt = node_output.get("retry_count", 1)
+                                err = node_output.get("validation_error", "")
+                                planner_finished = False
+                                substep_idx = 0
+                                yield {
+                                    "event": "retry",
+                                    "node": "validate",
+                                    "name": "质量校验自修复",
+                                    "status": "running",
+                                    "stage": "自愈微调修复",
+                                    "progress": 75,
+                                    "elapsed_seconds": round(time.time() - start_time, 1),
+                                    "message": f"第 {retry_cnt} 次规划发现轻微瑕疵，正在自动重试修复...",
+                                    "data": {"error": err}
+                                }
+                elif msg_type == "done":
+                    if not final_plan and payload:
+                        final_plan = payload
+                    break
+                elif msg_type == "error":
+                    raise payload
+
+            if not final_plan:
+                state = self.graph.get_state(config)
+                final_plan = state.values.get("trip_plan") if hasattr(state, "values") else None
+
+            if final_plan:
+                plan_dict = final_plan.model_dump(mode="json") if hasattr(final_plan, "model_dump") else final_plan
+                yield {
+                    "event": "plan_complete",
+                    "thread_id": tid,
+                    "progress": 100,
+                    "stage": "规划成功",
+                    "elapsed_seconds": round(time.time() - start_time, 1),
+                    "message": "旅行计划生成成功！",
+                    "data": plan_dict
+                }
+            else:
+                yield {
+                    "event": "error",
+                    "thread_id": tid,
+                    "progress": 0,
+                    "elapsed_seconds": round(time.time() - start_time, 1),
+                    "message": "未能生成有效的行程计划",
+                }
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            yield {
+                "event": "error",
+                "thread_id": tid,
+                "progress": 0,
+                "elapsed_seconds": round(time.time() - start_time, 1),
+                "message": f"流式规划执行失败: {str(exc)}",
+            }
+
 
     def prepare_trip_plan(self, request: TripRequest, thread_id: str | None = None) -> dict:
         """HITL 阶段一：并行搜索并在 planner 节点前挂起，返回候选数据供用户确认。"""
@@ -661,3 +956,124 @@ def get_trip_planner_agent() -> MultiAgentTripPlanner:
         _multi_agent_planner = MultiAgentTripPlanner()
 
     return _multi_agent_planner
+
+
+def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
+    """使用 LLM 或启发式提取将自然语言意图转换为 TripRequest 对象"""
+    from datetime import date, timedelta
+
+    tomorrow = date.today() + timedelta(days=1)
+
+    prompt = f"""你是一个智能旅行助理。请从用户输入的自然语言描述中提取旅行规划关键参数。
+用户输入: "{text}"
+
+请严格输出如下 JSON 格式，不得包含其它说明：
+```json
+{{
+  "city": "目的地城市名称，如：北京、上海、成都、西安等",
+  "travel_days": 3,
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "transportation": "公共交通 / 自驾 / 步行 / 混合",
+  "accommodation": "经济型酒店 / 舒适型酒店 / 豪华酒店 / 民宿",
+  "preferences": ["历史文化", "美食"],
+  "free_text_input": "用户的具体诉求或预算备注"
+}}
+```
+规则：
+1. 如果用户未指明日期，start_date 设置为 {(tomorrow).isoformat()}，end_date 依据天数推算；
+2. 如果用户未指明具体天数，默认提取为 3 天；
+3. 从文字中提取偏好（如提到故宫/博物馆提取“历史文化”，提到小吃/火锅提取“美食”，提到带娃/迪士尼提取“亲子/休闲”）。
+"""
+
+    agent_llm = llm or get_llm()
+    try:
+        options = {}
+        if getattr(agent_llm, "provider", "") == "qwen" and str(getattr(agent_llm, "model", "")).startswith("qwen3."):
+            options["extra_body"] = {"enable_thinking": False}
+
+        resp = agent_llm.generate("你是旅行参数提取助手，只返回严格的 JSON。", prompt, **options)
+
+        cleaned = resp.strip()
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```")[1].split("```")[0].strip()
+        else:
+            s = cleaned.find("{")
+            e = cleaned.rfind("}") + 1
+            if s != -1 and e > s:
+                cleaned = cleaned[s:e]
+
+        data = json.loads(cleaned)
+
+        days = int(data.get("travel_days") or 3)
+        days = max(1, min(30, days))
+
+        start_str = data.get("start_date")
+        try:
+            start_d = date.fromisoformat(start_str) if start_str else tomorrow
+        except Exception:
+            start_d = tomorrow
+
+        end_d = start_d + timedelta(days=days - 1)
+
+        city = str(data.get("city") or "").strip()
+        if not city:
+            city = "北京"
+
+        return TripRequest(
+            city=city,
+            start_date=start_d.isoformat(),
+            end_date=end_d.isoformat(),
+            travel_days=days,
+            transportation=data.get("transportation") or "公共交通",
+            accommodation=data.get("accommodation") or "舒适型酒店",
+            preferences=data.get("preferences") or ["历史文化", "美食"],
+            free_text_input=data.get("free_text_input") or text,
+        )
+    except Exception as exc:
+        print(f"⚠️ 自然语言参数提取异常，使用规则提取兜底: {exc}")
+        city = "北京"
+        popular_cities = [
+            "北京", "上海", "广州", "深圳", "成都", "杭州", "西安", "南京",
+            "重庆", "武汉", "苏州", "厦门", "青岛", "三亚", "昆明", "大理", "丽江", "哈尔滨"
+        ]
+        for c in popular_cities:
+            if c in text:
+                city = c
+                break
+
+        days = 3
+        m = re.search(r"(\d+)\s*(?:天|日)", text)
+        if m:
+            try:
+                days = int(m.group(1))
+            except Exception:
+                days = 3
+        days = max(1, min(30, days))
+
+        start_d = tomorrow
+        end_d = start_d + timedelta(days=days - 1)
+
+        prefs = []
+        if "文化" in text or "历史" in text or "故宫" in text or "古迹" in text:
+            prefs.append("历史文化")
+        if "美食" in text or "吃" in text or "火锅" in text:
+            prefs.append("美食")
+        if "自然" in text or "山" in text or "湖" in text or "风光" in text:
+            prefs.append("自然风光")
+        if not prefs:
+            prefs = ["休闲", "美食"]
+
+        return TripRequest(
+            city=city,
+            start_date=start_d.isoformat(),
+            end_date=end_d.isoformat(),
+            travel_days=days,
+            transportation="公共交通",
+            accommodation="舒适型酒店",
+            preferences=prefs,
+            free_text_input=text,
+        )
+

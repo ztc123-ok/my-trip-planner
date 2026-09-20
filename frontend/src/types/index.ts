@@ -148,4 +148,84 @@ export interface TripStateResponse {
   data?: TripStateData
 }
 
+// Phase 2: 对话式交互与流式推送类型定义
+
+export interface ThoughtStep {
+  id: string
+  title: string
+  detail: string
+  status: 'running' | 'completed' | 'failed'
+  stage?: string
+  node?: string
+  elapsedSeconds?: number
+  timestamp?: string
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  timestamp: string
+  planData?: TripPlan
+  streamEvents?: StreamEvent[]
+  thoughtSteps?: ThoughtStep[]
+  thoughtElapsed?: number
+  isThoughtExpanded?: boolean
+  loading?: boolean
+  changesSummary?: string
+}
+
+export interface ChatModifyRequest {
+  thread_id?: string
+  message: string
+  trip_plan: TripPlan
+  chat_history?: { role: string; content: string }[]
+}
+
+export interface ChatModifyData {
+  reply: string
+  updated_plan?: TripPlan
+  modified: boolean
+  thread_id: string
+  changes_summary?: string
+}
+
+export interface ChatModifyResponse {
+  success: boolean
+  message: string
+  data?: ChatModifyData
+}
+
+export interface StreamEvent {
+  event: 'start' | 'node_start' | 'node_progress' | 'node_finish' | 'retry' | 'plan_complete' | 'error' | string
+  node?: string
+  name?: string
+  status?: 'running' | 'completed' | 'failed'
+  stage?: string
+  progress?: number
+  message?: string
+  elapsed_seconds?: number
+  data?: any
+  thread_id?: string
+}
+
+export interface AgentNodeStatus {
+  key: string
+  name: string
+  icon: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  detail?: string
+  progress?: number
+}
+
+export interface ChatSession {
+  id: string
+  title: string
+  city: string
+  updatedAt: string
+  tripPlan?: TripPlan
+  messages: ChatMessage[]
+}
+
+
 

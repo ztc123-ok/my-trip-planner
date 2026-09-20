@@ -293,3 +293,62 @@ class TripHistoryResponse(BaseModel):
     history: List[CheckpointSnapshot] = Field(default=[], description="检查点时间线列表")
 
 
+# ============ Phase 2 对话式修改与流式推送模型 ============
+
+class ChatMessage(BaseModel):
+    """对话消息项"""
+    role: str = Field(..., description="角色: user/assistant/system")
+    content: str = Field(..., description="文本内容")
+    timestamp: Optional[str] = Field(default=None, description="发送时间戳")
+
+
+class ChatModifyRequest(BaseModel):
+    """对话式行程修改请求"""
+    thread_id: Optional[str] = Field(default=None, description="会话ID")
+    message: str = Field(..., description="用户对话修改指令，如：把第二天的故宫换成颐和园")
+    trip_plan: TripPlan = Field(..., description="当前旅行计划")
+    chat_history: List[ChatMessage] = Field(default=[], description="对话历史上下文")
+
+
+class ChatModifyData(BaseModel):
+    """对话式行程修改结果数据"""
+    reply: str = Field(..., description="AI 助手针对修改的自然语言回复说明")
+    updated_plan: Optional[TripPlan] = Field(default=None, description="更新后的旅行计划")
+    modified: bool = Field(default=True, description="是否发生了行程变更")
+    thread_id: str = Field(..., description="当前规划会话ID")
+    changes_summary: Optional[str] = Field(default=None, description="修改摘要简述")
+
+
+class ChatModifyResponse(BaseModel):
+    """对话式行程修改响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="处理成功", description="消息")
+    data: Optional[ChatModifyData] = Field(default=None, description="结果数据")
+
+
+class NaturalLanguageParseRequest(BaseModel):
+    """自然语言旅行意图提取请求"""
+    text: str = Field(..., description="用户输入的自然语言旅行想法", example="我想去北京玩3天，喜欢历史和美食，预算3000左右")
+
+
+class NaturalLanguageParseResponse(BaseModel):
+    """自然语言旅行意图提取响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="提取成功", description="消息")
+    data: Optional[TripRequest] = Field(default=None, description="解析生成的标准旅行请求对象")
+
+
+class PlanStreamEvent(BaseModel):
+    """流式推送事件体"""
+    event: str = Field(..., description="事件名称: start / node_start / node_finish / node_progress / retry / plan_complete / error")
+    node: Optional[str] = Field(default=None, description="节点名称")
+    name: Optional[str] = Field(default=None, description="节点展示名称")
+    status: Optional[str] = Field(default=None, description="状态: running / completed / failed")
+    progress: Optional[int] = Field(default=None, description="大致完成百分比 (0-100)")
+    message: Optional[str] = Field(default=None, description="状态描述文字")
+    stage: Optional[str] = Field(default=None, description="细分子阶段名称，如：动线拓扑建模")
+    elapsed_seconds: Optional[float] = Field(default=None, description="自开始起累计耗时秒数")
+    data: Optional[Union[dict, list, TripPlan]] = Field(default=None, description="事件携带的结构化数据")
+    thread_id: Optional[str] = Field(default=None, description="会话ID")
+
+

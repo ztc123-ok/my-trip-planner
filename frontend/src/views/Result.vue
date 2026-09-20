@@ -6,6 +6,11 @@
         ← 返回首页
       </a-button>
       <a-space size="middle">
+        <a-button type="primary" @click="chatDrawerVisible = true">
+          💬 AI 对话调整行程
+        </a-button>
+
+
         <a-button v-if="!editMode" @click="toggleEditMode" type="default">
           ✏️ 编辑行程
         </a-button>
@@ -32,6 +37,7 @@
             📥 导出行程 <DownOutlined />
           </a-button>
         </a-dropdown>
+
       </a-space>
     </div>
 
@@ -311,6 +317,74 @@
       <a-button type="primary" @click="goBack">返回首页创建行程</a-button>
     </a-empty>
 
+    <!-- 悬浮 AI 对话调整入口 -->
+    <div class="floating-chat-trigger" @click="chatDrawerVisible = true" title="点击展开 AI 行程小助手">
+      <span class="trigger-icon">💬</span>
+      <span class="trigger-text">AI 对话调整</span>
+    </div>
+
+    <!-- AI 对话调整抽屉 -->
+    <a-drawer
+      v-model:open="chatDrawerVisible"
+      title="🤖 AI 对话调整行程 (LangGraph 子图)"
+      placement="right"
+      width="440px"
+      :body-style="{ display: 'flex', flexDirection: 'column', height: 'calc(100% - 55px)', padding: '16px' }"
+    >
+      <!-- 快捷调整标签 -->
+      <div class="drawer-chips-wrap">
+        <div class="chips-title">💡 常见调整指令：</div>
+        <div class="chips-row">
+          <button
+            v-for="chip in drawerQuickChips"
+            :key="chip"
+            class="drawer-chip-btn"
+            @click="chatInput = chip; sendDrawerChat()"
+          >
+            {{ chip }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 对话消息列表 -->
+      <div class="drawer-messages" ref="drawerMsgContainer">
+        <div
+          v-for="(msg, idx) in chatMessages"
+          :key="idx"
+          class="d-msg-row"
+          :class="msg.role"
+        >
+          <div class="d-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+          <div class="d-bubble">
+            <div class="d-bubble-content">{{ msg.content }}</div>
+            <div class="d-bubble-time">{{ msg.time }}</div>
+          </div>
+        </div>
+        <div v-if="chatLoading" class="d-msg-row assistant">
+          <div class="d-avatar">🤖</div>
+          <div class="d-bubble loading">
+            <span>正在分析并更新行程中...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 抽屉底部输入区 -->
+      <div class="drawer-input-box">
+        <a-textarea
+          v-model:value="chatInput"
+          placeholder="输入您的修改想法，如：把第2天的故宫换成颐和园..."
+          :auto-size="{ minRows: 2, maxRows: 4 }"
+          @keydown.enter.exact.prevent="sendDrawerChat"
+        />
+        <div class="drawer-input-footer">
+          <span class="d-hint">Enter 发送 / Shift+Enter 换行</span>
+          <a-button type="primary" :loading="chatLoading" @click="sendDrawerChat">
+            发送指令
+          </a-button>
+        </div>
+      </div>
+    </a-drawer>
+
     <!-- 回到顶部按钮 -->
     <a-back-top :visibility-height="300">
       <div class="back-top-button">
@@ -319,6 +393,7 @@
     </a-back-top>
   </div>
 </template>
+
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
@@ -332,7 +407,7 @@ import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import dayjs from 'dayjs'
 import type { Attraction, TripPlan } from '@/types'
-import { getAttractionPhoto } from '@/services/api'
+import { getAttractionPhoto, chatModifyTripPlan } from '@/services/api'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -341,6 +416,85 @@ const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
+
+// AI 对话调整抽屉状态
+const chatDrawerVisible = ref(false)
+const chatInput = ref('')
+const chatLoading = ref(false)
+const drawerMsgContainer = ref<HTMLElement | null>(null)
+const chatMessages = ref<Array<{ role: 'user' | 'assistant'; content: string; time: string }>>([
+  {
+    role: 'assistant',
+    content: '您好！我是您的 AI 行程小助手。您可以随时告诉我如何调整当前行程，比如：“把第2天的故宫换成颐和园”、“预算控制在3000以内”、“推荐一家特色素食餐厅”。',
+    time: '刚刚'
+  }
+])
+const drawerQuickChips = [
+  '把第2天的一个景点换成更小众的',
+  '帮我推荐一家特色地道午餐',
+  '预算降低 500 元',
+  '行程太赶了，每天减少一个景点'
+]
+
+const sendDrawerChat = async () => {
+  const text = chatInput.value.trim()
+  if (!text || chatLoading.value || !tripPlan.value) return
+  chatInput.value = ''
+
+  chatMessages.value.push({
+    role: 'user',
+    content: text,
+    time: dayjs().format('HH:mm')
+  })
+  chatLoading.value = true
+
+  nextTick(() => {
+    if (drawerMsgContainer.value) drawerMsgContainer.value.scrollTop = drawerMsgContainer.value.scrollHeight
+  })
+
+  try {
+    const res = await chatModifyTripPlan({
+      message: text,
+      trip_plan: tripPlan.value,
+      chat_history: chatMessages.value.map(m => ({ role: m.role, content: m.content }))
+    })
+
+    if (res.success && res.data) {
+      chatMessages.value.push({
+        role: 'assistant',
+        content: res.data.reply + (res.data.changes_summary ? `\n（✨ ${res.data.changes_summary}）` : ''),
+        time: dayjs().format('HH:mm')
+      })
+
+      if (res.data.updated_plan && res.data.modified) {
+        tripPlan.value = res.data.updated_plan
+        sessionStorage.setItem('tripPlan', JSON.stringify(res.data.updated_plan))
+        message.success('行程与地图已联动更新！')
+        nextTick(() => {
+          void initMap()
+        })
+      }
+    } else {
+      chatMessages.value.push({
+        role: 'assistant',
+        content: res.message || '未能完成调整',
+        time: dayjs().format('HH:mm')
+      })
+    }
+  } catch (err: any) {
+    chatMessages.value.push({
+      role: 'assistant',
+      content: `调整失败: ${err.message || err}`,
+      time: dayjs().format('HH:mm')
+    })
+  } finally {
+    chatLoading.value = false
+    nextTick(() => {
+      if (drawerMsgContainer.value) drawerMsgContainer.value.scrollTop = drawerMsgContainer.value.scrollHeight
+    })
+  }
+}
+
 const missingWeatherDates = computed(() => {
   if (!tripPlan.value) return []
 
@@ -1569,4 +1723,160 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
     flex: auto;
   }
 }
+
+/* AI 对话调整浮标与抽屉样式 */
+.floating-chat-trigger {
+  position: fixed;
+  bottom: 40px;
+  right: 40px;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #ffffff;
+  padding: 12px 20px;
+  border-radius: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.35);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 999;
+}
+
+.floating-chat-trigger:hover {
+  transform: translateY(-3px) scale(1.03);
+  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.45);
+}
+
+.trigger-icon {
+  font-size: 20px;
+}
+
+.trigger-text {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.drawer-chips-wrap {
+  background: #f8fafc;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  border: 1px solid #e2e8f0;
+}
+
+.chips-title {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.drawer-chip-btn {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.drawer-chip-btn:hover {
+  border-color: #3b82f6;
+  color: #2563eb;
+  background: #eff6ff;
+}
+
+.drawer-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 8px 4px;
+  margin-bottom: 12px;
+}
+
+.d-msg-row {
+  display: flex;
+  gap: 10px;
+}
+
+.d-msg-row.user {
+  flex-direction: row-reverse;
+}
+
+.d-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.d-msg-row.user .d-avatar {
+  background: #dbeafe;
+}
+
+.d-bubble {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.d-msg-row.user .d-bubble {
+  background: #2563eb;
+  color: #ffffff;
+  border-bottom-right-radius: 2px;
+}
+
+.d-msg-row.assistant .d-bubble {
+  background: #f1f5f9;
+  color: #1e293b;
+  border-bottom-left-radius: 2px;
+}
+
+.d-bubble.loading {
+  color: #64748b;
+  font-style: italic;
+}
+
+.d-bubble-time {
+  font-size: 10px;
+  margin-top: 4px;
+  opacity: 0.6;
+  text-align: right;
+}
+
+.drawer-input-box {
+  border-top: 1px solid #f1f5f9;
+  padding-top: 10px;
+}
+
+.drawer-input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.d-hint {
+  font-size: 11px;
+  color: #94a3b8;
+}
 </style>
+

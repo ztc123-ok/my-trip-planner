@@ -1,7 +1,7 @@
-"""旅行规划API路由"""
-
+import json
 import uuid
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from ...models.schemas import (
     TripRequest,
@@ -14,10 +14,16 @@ from ...models.schemas import (
     TripStateData,
     TripHistoryResponse,
     CheckpointSnapshot,
+    ChatModifyRequest,
+    ChatModifyResponse,
+    NaturalLanguageParseRequest,
+    NaturalLanguageParseResponse,
 )
-from ...agents.trip_planner_agent import get_trip_planner_agent
+from ...agents.trip_planner_agent import get_trip_planner_agent, parse_natural_language_trip
+from ...agents.chat_modify_agent import get_chat_modify_agent
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
+
 
 
 @router.post(
@@ -80,7 +86,45 @@ async def plan_trip(request: TripRequest):
 
 
 @router.post(
+    "/plan/stream",
+    summary="流式生成旅行计划 (SSE)",
+    description="利用 LangGraph astream 逐个推送智能体专家节点的执行状态与最终旅行计划"
+)
+async def plan_trip_stream(request: TripRequest):
+    """流式返回旅行规划进展及最终计划 (SSE)"""
+    try:
+        tid = request.thread_id or f"trip_{uuid.uuid4().hex[:12]}"
+        request.thread_id = tid
+        agent = await run_in_threadpool(get_trip_planner_agent)
+
+        async def sse_event_stream():
+            try:
+                yield ": ping\n\n"
+                async for event_data in agent.astream_plan_trip(request, thread_id=tid):
+                    event_name = event_data.get("event", "message")
+                    payload = json.dumps(event_data, ensure_ascii=False)
+                    yield f"event: {event_name}\ndata: {payload}\n\n"
+            except Exception as exc:
+                err_payload = json.dumps({"event": "error", "message": str(exc), "thread_id": tid}, ensure_ascii=False)
+                yield f"event: error\ndata: {err_payload}\n\n"
+
+        return StreamingResponse(
+            sse_event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+    except Exception as e:
+        print(f"❌ 流式生成旅行计划启动失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"流式旅行规划失败: {str(e)}")
+
+
+@router.post(
     "/plan/prepare",
+
     response_model=PlanCandidateResponse,
     summary="准备旅行规划（HITL 阶段一）",
     description="执行景点、天气、酒店并行查询，在规划生成前挂起，返回候选数据供用户确认"
@@ -199,10 +243,59 @@ async def get_plan_history(thread_id: str):
         raise HTTPException(status_code=500, detail=f"查询会话历史失败: {str(e)}")
 
 
+@router.post(
+    "/chat/modify",
+    response_model=ChatModifyResponse,
+    summary="对话式修改旅行计划 (LangGraph chat_modify 子图)",
+    description="通过自然语言与 Agent 对话，调整行程中的景点、酒店、餐饮或预算，并联动更新计划"
+)
+async def chat_modify_plan(request: ChatModifyRequest):
+    """通过自然语言修改已生成的旅行计划"""
+    try:
+        print(f"\n{'='*60}")
+        print(f"💬 收到对话式修改指令:")
+        print(f"   会话ID: {request.thread_id}")
+        print(f"   用户指令: {request.message}")
+        print(f"{'='*60}\n")
+
+        modifier = await run_in_threadpool(get_chat_modify_agent)
+        result_data = await run_in_threadpool(modifier.modify_plan, request)
+
+        return ChatModifyResponse(
+            success=True,
+            message="行程修改处理成功",
+            data=result_data,
+        )
+    except Exception as e:
+        print(f"❌ 对话修改行程失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"行程修改失败: {str(e)}")
+
+
+@router.post(
+    "/chat/parse",
+    response_model=NaturalLanguageParseResponse,
+    summary="自然语言旅行意图提取",
+    description="将用户在对话框中输入的自然语言（如：'我想去北京玩3天，预算3000'）自动转换为标准旅行请求对象"
+)
+async def chat_parse_intent(request: NaturalLanguageParseRequest):
+    """将自然语言描述提取为 TripRequest 参数"""
+    try:
+        trip_req = await run_in_threadpool(parse_natural_language_trip, request.text)
+        return NaturalLanguageParseResponse(
+            success=True,
+            message="提取成功",
+            data=trip_req,
+        )
+    except Exception as e:
+        print(f"❌ 自然语言意图提取失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"意图提取失败: {str(e)}")
 
 
 @router.get(
     "/health",
+
     summary="健康检查",
     description="检查旅行规划服务是否正常"
 )

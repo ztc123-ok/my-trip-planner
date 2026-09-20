@@ -6,6 +6,7 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from unittest.mock import patch
 
 from app.agents.trip_planner_agent import (
@@ -1063,5 +1064,232 @@ class CheckpointerTests(unittest.TestCase):
             self.assertEqual(res_hist404.status_code, 404)
 
 
+class Phase2ChatModifyTests(unittest.TestCase):
+    class FakeChatLLM:
+        provider = "other"
+        model = "test"
+        timeout = 60
+        def __init__(self, response_text):
+            self.response_text = response_text
+        def generate(self, system_prompt, user_prompt, **opts):
+            return self.response_text
+
+    def test_entity_extraction(self):
+        from app.agents.chat_modify_agent import ChatModifyAgent
+        agent = ChatModifyAgent(llm=self.FakeChatLLM("{}"), amap_service=AmapService(mcp_tool=FakeMCP(None)))
+        entities = agent._extract_potential_entities("把第二天的故宫换成颐和园，中午吃全聚德烤鸭")
+        self.assertIn("颐和园", entities)
+        self.assertIn("全聚德烤鸭", entities)
+
+    def test_chat_modify_agent_recalculates_budget(self):
+        from app.agents.chat_modify_agent import ChatModifyAgent
+        from app.models.schemas import ChatModifyRequest, ChatMessage, TripPlan
+
+        mock_modified_plan = {
+            "reply": "已为您将故宫替换为颐和园",
+            "modified": True,
+            "changes_summary": "故宫替换为颐和园",
+            "updated_plan": {
+                "city": "北京",
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-01",
+                "days": [
+                    {
+                        "date": "2026-10-01",
+                        "day_index": 0,
+                        "description": "第1天游览颐和园",
+                        "transportation": "公共交通",
+                        "accommodation": "经济型酒店",
+                        "hotel": {
+                            "name": "如家精选",
+                            "address": "海淀区",
+                            "location": {"longitude": 116.3, "latitude": 39.9},
+                            "price_range": "300-400元",
+                            "rating": "4.6",
+                            "distance": "距颐和园 1.5km",
+                            "type": "经济型",
+                            "estimated_cost": 350
+                        },
+                        "attractions": [
+                            {
+                                "name": "颐和园",
+                                "address": "新建宫门路19号",
+                                "location": {"longitude": 116.27, "latitude": 39.99},
+                                "visit_duration": 180,
+                                "description": "皇家园林",
+                                "category": "景点",
+                                "ticket_price": 50
+                            }
+                        ],
+                        "meals": [
+                            {"type": "breakfast", "name": "豆浆油条", "description": "传统早餐", "estimated_cost": 20},
+                            {"type": "lunch", "name": "素食便当", "description": "健康午餐", "estimated_cost": 40},
+                            {"type": "dinner", "name": "北京烤鸭", "description": "特色晚餐", "estimated_cost": 100}
+                        ]
+                    }
+                ],
+                "weather_info": [],
+                "overall_suggestions": "请注意防晒",
+                "budget": {
+                    "total_attractions": 50,
+                    "total_hotels": 350,
+                    "total_meals": 160,
+                    "total_transportation": 200,
+                    "total": 760
+                }
+            }
+        }
+
+        fake_llm = self.FakeChatLLM(f"```json\n{json.dumps(mock_modified_plan, ensure_ascii=False)}\n```")
+        agent = ChatModifyAgent(llm=fake_llm, amap_service=AmapService(mcp_tool=FakeMCP(None)))
+
+        orig_plan = TripPlan(**mock_modified_plan["updated_plan"])
+        req = ChatModifyRequest(
+            thread_id="test_chat_1",
+            message="把故宫换成颐和园",
+            trip_plan=orig_plan,
+            chat_history=[ChatMessage(role="user", content="把故宫换成颐和园")]
+        )
+
+        res = agent.modify_plan(req)
+        self.assertTrue(res.modified)
+        self.assertEqual(res.changes_summary, "故宫替换为颐和园")
+        self.assertIsNotNone(res.updated_plan)
+        self.assertEqual(res.updated_plan.budget.total_attractions, 50)
+        self.assertEqual(res.updated_plan.budget.total_hotels, 350)
+        self.assertEqual(res.updated_plan.budget.total_meals, 160)
+        self.assertEqual(res.updated_plan.budget.total, 760)
+
+    def test_parse_natural_language_trip(self):
+        from app.agents.trip_planner_agent import parse_natural_language_trip
+        mock_output = {
+            "city": "成都",
+            "travel_days": 4,
+            "start_date": "2026-11-01",
+            "end_date": "2026-11-04",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "preferences": ["美食", "休闲"],
+            "free_text_input": "想去吃地道老火锅"
+        }
+        fake_llm = self.FakeChatLLM(f"```json\n{json.dumps(mock_output, ensure_ascii=False)}\n```")
+        req = parse_natural_language_trip("我想去成都玩4天，多吃火锅，住舒适酒店", llm=fake_llm)
+        self.assertEqual(req.city, "成都")
+        self.assertEqual(req.travel_days, 4)
+        self.assertIn("美食", req.preferences)
+
+    def test_api_chat_and_stream_routes(self):
+        from fastapi.testclient import TestClient
+        from app.api.main import app as api_app
+        from app.models.schemas import TripPlan, ChatModifyData
+
+        client = TestClient(api_app)
+
+
+        # 1. 测试自然语言提取接口
+        with patch("app.api.routes.trip.parse_natural_language_trip") as mock_parse:
+            from app.models.schemas import TripRequest
+            mock_parse.return_value = TripRequest(
+                city="上海",
+                start_date="2026-10-01",
+                end_date="2026-10-02",
+                travel_days=2,
+                transportation="公共交通",
+                accommodation="经济型酒店",
+                preferences=["艺术"]
+            )
+            resp = client.post("/api/trip/chat/parse", json={"text": "去上海玩两天"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json()["data"]["city"], "上海")
+
+        # 2. 测试对话修改接口
+        class FakeModifier:
+            def modify_plan(self, req):
+                return ChatModifyData(
+                    reply="修改成功",
+                    updated_plan=req.trip_plan,
+                    modified=True,
+                    thread_id=req.thread_id or "tid_123",
+                    changes_summary="已替换景点"
+                )
+
+        plan_dict = {
+            "city": "北京",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-01",
+            "days": [
+                {
+                    "date": "2026-10-01",
+                    "day_index": 0,
+                    "description": "第1天",
+                    "transportation": "公共交通",
+                    "accommodation": "经济型酒店",
+                    "attractions": [
+                        {
+                            "name": "天安门",
+                            "address": "东城区",
+                            "location": {"longitude": 116.39, "latitude": 39.9},
+                            "visit_duration": 60,
+                            "description": "广场",
+                            "ticket_price": 0
+                        }
+                    ],
+                    "meals": [
+                        {"type": "breakfast", "name": "包子", "estimated_cost": 15},
+                        {"type": "lunch", "name": "炸酱面", "estimated_cost": 30},
+                        {"type": "dinner", "name": "烤肉", "estimated_cost": 70}
+                    ]
+                }
+            ],
+            "weather_info": [],
+            "overall_suggestions": "好建议",
+            "budget": {
+                "total_attractions": 0,
+                "total_hotels": 0,
+                "total_meals": 115,
+                "total_transportation": 200,
+                "total": 315
+            }
+        }
+
+        with patch("app.api.routes.trip.get_chat_modify_agent", return_value=FakeModifier()):
+            resp = client.post("/api/trip/chat/modify", json={
+                "thread_id": "test_tid",
+                "message": "换个景点",
+                "trip_plan": plan_dict,
+                "chat_history": []
+            })
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json()["success"])
+            self.assertEqual(resp.json()["data"]["reply"], "修改成功")
+
+        # 3. 测试流式接口 /plan/stream (SSE)
+        class FakeStreamAgent:
+            agent_names = ("景点专家",)
+
+            async def astream_plan_trip(self, req, thread_id=None):
+                yield {"event": "start", "progress": 5, "message": "开始"}
+                yield {"event": "node_finish", "node": "attractions", "progress": 30, "message": "景点完成"}
+                yield {"event": "plan_complete", "progress": 100, "message": "完成", "data": plan_dict}
+
+        with patch("app.api.routes.trip.get_trip_planner_agent", return_value=FakeStreamAgent()):
+
+            resp = client.post("/api/trip/plan/stream", json={
+                "city": "北京",
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-01",
+                "travel_days": 1,
+                "transportation": "公共交通",
+                "accommodation": "经济型酒店"
+            })
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("text/event-stream", resp.headers["content-type"])
+            text = resp.text
+            self.assertIn("event: start", text)
+            self.assertIn("event: node_finish", text)
+            self.assertIn("event: plan_complete", text)
+
+
 if __name__ == "__main__":
     unittest.main()
+

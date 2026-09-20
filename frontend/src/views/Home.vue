@@ -14,7 +14,14 @@
       </div>
       <h1 class="page-title">智能旅行助手</h1>
       <p class="page-subtitle">基于AI的个性化旅行规划,让每一次出行都完美无忧</p>
+      <div style="margin-top: 14px;">
+        <a-button type="primary" shape="round" size="large" @click="goToWorkspace">
+          💬 进入全新 AI 对话工作台（推荐）
+        </a-button>
+      </div>
+
     </div>
+
 
     <a-card class="form-card" :bordered="false">
       <a-form
@@ -287,17 +294,21 @@
   </div>
 </template>
 
-
 <script setup lang="ts">
 import { ref, reactive, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
-import { generateTripPlan, prepareTripPlan, confirmTripPlan, getTripPlanState } from '@/services/api'
-import type { TripFormData, PlanCandidateData } from '@/types'
+import { generateTripPlanStream, prepareTripPlan, confirmTripPlan, getTripPlanState } from '@/services/api'
+import type { TripFormData, PlanCandidateData, StreamEvent } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
+const goToWorkspace = () => {
+  router.push('/')
+}
+
 const loading = ref(false)
+
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
 
@@ -445,26 +456,8 @@ const handleSubmit = async () => {
   }
 
   loading.value = true
-  loadingProgress.value = 0
-  loadingStatus.value = '正在初始化...'
-
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = enableHitl.value ? '⏸️ 等待人机确认...' : '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
+  loadingProgress.value = 5
+  loadingStatus.value = '正在启动 LangGraph 多智能体协作...'
 
   try {
     const requestData: TripFormData = {
@@ -480,8 +473,9 @@ const handleSubmit = async () => {
 
     if (enableHitl.value) {
       // 人机协同模式：第一阶段获取候选并挂起
+      loadingStatus.value = '正在并行检索景点与酒店候选...'
+      loadingProgress.value = 40
       const response = await prepareTripPlan(requestData)
-      clearInterval(progressInterval)
       loading.value = false
       loadingProgress.value = 0
       loadingStatus.value = ''
@@ -500,35 +494,45 @@ const handleSubmit = async () => {
       return
     }
 
-    // 默认全自动规划
-    const response = await generateTripPlan(requestData)
-
-    clearInterval(progressInterval)
-    loadingProgress.value = 100
-    loadingStatus.value = '✅ 完成!'
-
-    if (response.success && response.data) {
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-      message.success('旅行计划生成成功!')
-      setTimeout(() => {
-        router.push('/result')
-      }, 500)
-    } else {
-      message.error(response.message || '生成失败')
-    }
-  } catch (error: any) {
-    clearInterval(progressInterval)
-    message.error(error.message || '生成旅行计划失败,请稍后重试')
-  } finally {
-    if (!enableHitl.value) {
-      setTimeout(() => {
+    // 全自动模式：使用真实 LangGraph SSE 流式推送
+    await generateTripPlanStream(
+      requestData,
+      (evt: StreamEvent) => {
+        const timeSuffix = evt.elapsed_seconds ? ` (${Math.round(evt.elapsed_seconds)}s)` : ''
+        if (evt.event === 'node_finish') {
+          loadingProgress.value = evt.progress || Math.min(95, loadingProgress.value + 15)
+          loadingStatus.value = (evt.message || '多智能体协作中...') + timeSuffix
+        } else if (evt.event === 'node_start' || evt.event === 'node_progress') {
+          loadingProgress.value = evt.progress || Math.min(92, loadingProgress.value + 3)
+          const stagePrefix = evt.stage ? `【${evt.stage}】` : ''
+          loadingStatus.value = `${stagePrefix}${evt.message || '多智能体深度推演中...'}${timeSuffix}`
+        } else if (evt.event === 'retry') {
+          loadingStatus.value = (evt.message || '正在自动重试修复行程...') + timeSuffix
+          loadingProgress.value = evt.progress || 75
+        } else if (evt.event === 'plan_complete' && evt.data) {
+          loadingProgress.value = 100
+          loadingStatus.value = '✅ 旅行计划生成成功!' + timeSuffix
+          sessionStorage.setItem('tripPlan', JSON.stringify(evt.data))
+          message.success('旅行计划生成成功!')
+          setTimeout(() => {
+            router.push('/result')
+          }, 400)
+        } else if (evt.event === 'error') {
+          message.error(evt.message || '生成旅行计划出现异常')
+          loading.value = false
+        }
+      },
+      (err: any) => {
+        message.error(err.message || '流式连接发生错误')
         loading.value = false
-        loadingProgress.value = 0
-        loadingStatus.value = ''
-      }, 1000)
-    }
+      }
+    )
+  } catch (error: any) {
+    message.error(error.message || '生成旅行计划失败,请稍后重试')
+    loading.value = false
   }
 }
+
 
 const handleConfirmHitl = async () => {
   if (!candidateData.value) return

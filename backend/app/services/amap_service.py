@@ -63,12 +63,13 @@ def as_text(value: Any) -> str:
 def resolve_uvx() -> str:
     """优先使用当前 Python 环境安装的 uvx，避免 IDE 未激活 Conda 时找不到命令。"""
     python_dir = Path(sys.executable).resolve().parent
-    local_uvx = (
-        python_dir / "Scripts" / "uvx.exe"
-        if os.name == "nt" else python_dir / "uvx"
-    )
-    if local_uvx.is_file():
-        return str(local_uvx)
+    candidates = [
+        python_dir / ("uvx.exe" if os.name == "nt" else "uvx"),
+        python_dir / "Scripts" / "uvx.exe" if os.name == "nt" else python_dir / "bin" / "uvx",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
     uvx = shutil.which("uvx")
     if uvx:
         return uvx
@@ -76,6 +77,7 @@ def resolve_uvx() -> str:
         f"找不到 uvx；请在当前 Python 环境 {sys.executable} 中安装 uv，"
         "或将 uvx 所在目录加入 PATH。"
     )
+
 
 
 def create_amap_tool(api_key: str) -> MCPToolClient:

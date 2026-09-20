@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
+import ChatWorkspace from './views/ChatWorkspace.vue'
 import Home from './views/Home.vue'
 import Result from './views/Result.vue'
 
@@ -11,6 +12,11 @@ const router = createRouter({
   routes: [
     {
       path: '/',
+      name: 'ChatWorkspace',
+      component: ChatWorkspace
+    },
+    {
+      path: '/form',
       name: 'Home',
       component: Home
     },
@@ -21,6 +27,7 @@ const router = createRouter({
     }
   ]
 })
+
 
 const app = createApp(App)
 
