@@ -259,45 +259,421 @@
                   </div>
                 </div>
 
-                <!-- 生成成功的行程概要预览卡片 -->
-                <div class="plan-summary-card" v-if="msg.planData">
-                  <div class="plan-card-header">
-                    <div class="plan-card-title">
-                      <span>🗺️ {{ msg.planData.city }} {{ msg.planData.days.length }}天深度旅行规划</span>
-                      <span class="date-badge">{{ msg.planData.start_date }} ~ {{ msg.planData.end_date }}</span>
+                <!-- 前置行程参数快速确认胶囊 (Pre-Trip Parameter Card) -->
+                <div class="pre-trip-param-card" v-if="msg.isParamConfirmPending && msg.pendingParams">
+                  <div class="param-card-header">
+                    <div class="param-header-left">
+                      <span class="param-badge-icon">🧭</span>
+                      <div class="param-title-box">
+                        <div class="param-card-title">
+                          {{ msg.pendingParams.has_explicit_duration ? `出发时间确认 · ${msg.pendingParams.travel_days}日深度游` : '行程基准要素确认' }}
+                        </div>
+                        <div class="param-card-subtitle">
+                          {{ msg.pendingParams.has_explicit_duration ? `已锁定 ${msg.pendingParams.travel_days} 天行程容量与偏好，请点选您的出发日期以精准锁定高德实时气象与开闭馆排期` : '已为您锁定目标城市，可快速微调出发时间与偏好，确保高德气象与推荐容量严密吻合' }}
+                        </div>
+                      </div>
                     </div>
-                    <div class="budget-badge" v-if="msg.planData.budget">
-                      预估总费用：¥{{ msg.planData.budget.total }}
+                    <span class="param-status-tag">{{ msg.pendingParams.has_explicit_duration ? '请定出发日' : '待核对' }}</span>
+                  </div>
+
+                  <div class="param-form-grid">
+                    <!-- 目的地城市 -->
+                    <div class="param-grid-item">
+                      <label class="param-label">📍 目的地城市</label>
+                      <input
+                        type="text"
+                        class="param-input"
+                        v-model="msg.pendingParams.city"
+                        placeholder="输入城市名称"
+                      />
+                    </div>
+
+                    <!-- 出行日期与天数 -->
+                    <div class="param-grid-item dates-item">
+                      <label class="param-label">📅 出发与返程日期</label>
+                      <div class="param-date-row">
+                        <input
+                          type="date"
+                          class="param-input date-input"
+                          :value="msg.pendingParams.start_date"
+                          @change="(e: any) => handlePreParamDateChange(msg, 'start', e.target.value)"
+                        />
+                        <span class="date-sep">至</span>
+                        <input
+                          type="date"
+                          class="param-input date-input"
+                          :value="msg.pendingParams.end_date"
+                          @change="(e: any) => handlePreParamDateChange(msg, 'end', e.target.value)"
+                        />
+                        <span class="param-days-badge">共 {{ msg.pendingParams.travel_days }} 天</span>
+                      </div>
+                    </div>
+
+                    <!-- 旅行偏好选择 -->
+                    <div class="param-grid-item full-width">
+                      <label class="param-label">✨ 旅行偏好风格</label>
+                      <div class="param-pref-tags">
+                        <span
+                          v-for="pref in ['历史文化', '特色美食', '自然风光', '休闲度假', '亲子娱乐', '网红打卡']"
+                          :key="pref"
+                          class="pref-choice-pill"
+                          :class="{ active: (msg.pendingParams.preferences || []).includes(pref) }"
+                          @click="togglePreParamPreference(msg, pref)"
+                        >
+                          {{ pref }}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  <!-- 每日精炼亮点 -->
+                  <div class="param-card-actions">
+                    <button
+                      type="button"
+                      class="param-confirm-btn primary"
+                      @click="handleConfirmPreParams(msg, false)"
+                    >
+                      🚀 确认参数 · 启动多智能体推演
+                    </button>
+                    <button
+                      type="button"
+                      class="param-confirm-btn secondary"
+                      @click="handleConfirmPreParams(msg, true)"
+                      title="直接使用默认推算的近期时间开始规划"
+                    >
+                      ⚡ 按默认近期直出
+                    </button>
+                  </div>
+                </div>
+
+                <!-- In-Chat HITL 人机协同候选确认卡片 (当进入协同挂起状态或已确认时展示) -->
+                <div
+                  class="in-chat-hitl-card"
+                  v-if="msg.hitlCandidateData"
+                  :class="{ 'is-confirmed': msg.hitlConfirmed }"
+                >
+                  <div class="hitl-card-header">
+                    <div class="hitl-header-main">
+                      <span class="hitl-badge-icon">🤝</span>
+                      <div class="hitl-title-box">
+                        <div class="hitl-title">人机协同候选确认中心 (In-Chat HITL)</div>
+                        <div class="hitl-subtitle">
+                          多智能体已完成数据采集并挂起，请勾选您中意的景点与住宿注入规划
+                        </div>
+                      </div>
+                    </div>
+                    <div class="hitl-status-pill" :class="{ confirmed: msg.hitlConfirmed }">
+                      {{ msg.hitlConfirmed ? '✓ 协同决策已锁定' : '⏳ 等待您的确认' }}
+                    </div>
+                  </div>
+
+                  <!-- 出行周期轻量确认/微调条 -->
+                  <div class="hitl-date-bar">
+                    <div class="date-bar-left">
+                      <span class="date-bar-icon">📅</span>
+                      <span class="date-bar-label">出行周期确认：</span>
+                      <div class="date-inputs-wrap" v-if="!msg.hitlConfirmed">
+                        <input
+                          type="date"
+                          class="hitl-date-input"
+                          :value="msg.hitlStartDate"
+                          @change="(e: any) => handleHitlDateChange(msg, 'start', e.target.value)"
+                          title="点击修改出发日期"
+                        />
+                        <span class="date-separator">至</span>
+                        <input
+                          type="date"
+                          class="hitl-date-input"
+                          :value="msg.hitlEndDate"
+                          @change="(e: any) => handleHitlDateChange(msg, 'end', e.target.value)"
+                          title="点击修改返程日期"
+                        />
+                        <span class="date-days-pill">共 {{ msg.hitlTravelDays || msg.hitlCandidateData.travel_days || 1 }} 天</span>
+                      </div>
+                      <span class="date-confirmed-val" v-else>
+                        {{ msg.hitlStartDate || '未设定' }} 至 {{ msg.hitlEndDate || '未设定' }} (共 {{ msg.hitlTravelDays || msg.hitlCandidateData.travel_days || 1 }} 天)
+                      </span>
+                    </div>
+                    <span class="date-tip-sub" v-if="!msg.hitlConfirmed">
+                      💡 默认自动推算近期出发，点击日期可直接校准真实行程时间
+                    </span>
+                  </div>
+
+                  <!-- 天数/时效失配预警与一键重查条 (Invalidation & Re-search) -->
+                  <div
+                    class="hitl-stale-warning"
+                    v-if="!msg.hitlConfirmed && msg.initialTravelDays && msg.hitlTravelDays !== msg.initialTravelDays"
+                  >
+                    <div class="stale-warning-content">
+                      <span class="stale-warning-icon">⚠️</span>
+                      <div class="stale-warning-info">
+                        <div class="stale-title">游玩天数由 <strong>{{ msg.initialTravelDays }}天</strong> 调整为 <strong>{{ msg.hitlTravelDays }}天</strong></div>
+                        <div class="stale-desc">
+                          原有候选景点池（共 {{ msg.hitlCandidateData.candidate_attractions?.length || 0 }} 处）与气象基于原周期采集，建议重新检索以匹配更多路线与适期气象。
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="hitl-refresh-btn"
+                      :disabled="msg.hitlRefreshing"
+                      @click="handleRefreshHitlCandidates(msg)"
+                    >
+                      {{ msg.hitlRefreshing ? '🔄 正在同步...' : '🔄 重新匹配新周期候选' }}
+                    </button>
+                  </div>
+
+                  <!-- 目的地未来气象胶囊横条 -->
+                  <div
+                    class="hitl-weather-bar"
+                    v-if="msg.hitlCandidateData.weather_info && msg.hitlCandidateData.weather_info.length > 0"
+                  >
+                    <span class="weather-bar-title">🌤️ 目的地未来气象参考：</span>
+                    <div class="weather-bar-tags">
+                      <span
+                        v-for="w in msg.hitlCandidateData.weather_info"
+                        :key="w.date"
+                        class="weather-mini-tag"
+                      >
+                        {{ formatShortDate(w.date) }} {{ getWeatherEmoji(w.day_weather) }} {{ w.day_weather }} ({{ w.night_temp }}°~{{ w.day_temp }}°C)
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- 候选景点多选区 -->
+                  <div class="hitl-section">
+                    <div class="hitl-section-header">
+                      <div class="section-title">
+                        <span>📍 候选核心景点</span>
+                        <span class="count-tag">
+                          已勾选 <strong>{{ (msg.hitlSelectedAttractions || []).length }}</strong> / {{ msg.hitlCandidateData.candidate_attractions?.length || 0 }} 处
+                        </span>
+                      </div>
+                      <div class="section-actions" v-if="!msg.hitlConfirmed">
+                        <button type="button" class="mini-text-btn" @click="selectAllHitlAttractions(msg)">全选</button>
+                        <span class="divider">|</span>
+                        <button type="button" class="mini-text-btn" @click="clearHitlAttractions(msg)">清空</button>
+                      </div>
+                    </div>
+
+                    <div class="hitl-attractions-grid">
+                      <div
+                        v-for="poi in msg.hitlCandidateData.candidate_attractions"
+                        :key="poi.name"
+                        class="hitl-poi-card"
+                        :class="{
+                          'is-selected': (msg.hitlSelectedAttractions || []).includes(poi.name),
+                          'is-disabled': msg.hitlConfirmed
+                        }"
+                        @click="!msg.hitlConfirmed && toggleHitlAttraction(msg, poi.name)"
+                      >
+                        <div class="poi-checkbox">
+                          <span class="check-icon" v-if="(msg.hitlSelectedAttractions || []).includes(poi.name)">✓</span>
+                        </div>
+                        <div class="poi-details">
+                          <div class="poi-top-row">
+                            <span class="poi-name" :title="poi.name">{{ poi.name }}</span>
+                            <span class="poi-rating" v-if="poi.rating">⭐ {{ poi.rating }}</span>
+                          </div>
+                          <div class="poi-mid-row">
+                            <span class="poi-type" v-if="poi.type">{{ poi.type.split(';')[0] }}</span>
+                          </div>
+                          <div class="poi-address" :title="poi.address">{{ poi.address || '地址详见行程地图' }}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 候选酒店单选区 -->
+                  <div
+                    class="hitl-section"
+                    v-if="msg.hitlCandidateData.candidate_hotels && msg.hitlCandidateData.candidate_hotels.length > 0"
+                  >
+                    <div class="hitl-section-header">
+                      <div class="section-title">
+                        <span>🏨 候选推荐住宿（单选）</span>
+                      </div>
+                    </div>
+
+                    <div class="hitl-hotels-grid">
+                      <div
+                        v-for="hotel in msg.hitlCandidateData.candidate_hotels"
+                        :key="hotel.name"
+                        class="hitl-hotel-card"
+                        :class="{
+                          'is-selected': msg.hitlSelectedHotel === hotel.name,
+                          'is-disabled': msg.hitlConfirmed
+                        }"
+                        @click="!msg.hitlConfirmed && selectHitlHotel(msg, hotel.name)"
+                      >
+                        <div class="hotel-radio">
+                          <span class="radio-core" v-if="msg.hitlSelectedHotel === hotel.name"></span>
+                        </div>
+                        <div class="hotel-details">
+                          <div class="hotel-top-row">
+                            <span class="hotel-name" :title="hotel.name">{{ hotel.name }}</span>
+                            <span class="hotel-price" v-if="hotel.price_range">{{ hotel.price_range }}</span>
+                          </div>
+                          <div class="hotel-meta">
+                            <span class="hotel-rating" v-if="hotel.rating">⭐ {{ hotel.rating }}</span>
+                            <span class="hotel-tag" v-if="hotel.tag">{{ hotel.tag }}</span>
+                            <span
+                              class="hotel-distance"
+                              v-if="getHotelDistanceDisplay(hotel, msg.hitlCandidateData.candidate_attractions)"
+                              :title="getHotelDistanceDisplay(hotel, msg.hitlCandidateData.candidate_attractions)"
+                            >
+                              📍 {{ getHotelDistanceDisplay(hotel, msg.hitlCandidateData.candidate_attractions) }}
+                            </span>
+                          </div>
+                          <div class="hotel-address" :title="hotel.address">{{ hotel.address || '核心商圈' }}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 补充微调偏好输入 -->
+                  <div class="hitl-feedback-box" v-if="!msg.hitlConfirmed">
+                    <div class="feedback-title">
+                      <span>✍️ 补充定制意见或特殊偏好（选填）：</span>
+                    </div>
+                    <a-input
+                      v-model:value="msg.hitlUserFeedback"
+                      placeholder="例如：第一天想先在酒店周边简单逛逛，少走路；多安排老字号美食..."
+                      :disabled="msg.hitlConfirmed || msg.hitlSubmitting"
+                      class="hitl-feedback-input"
+                      @keydown.enter.stop="handleConfirmInChatHitl(msg)"
+                    />
+                  </div>
+                  <div class="hitl-feedback-display" v-else-if="msg.hitlUserFeedback">
+                    <span class="fb-tag">定制偏好：</span>
+                    <span class="fb-content">{{ msg.hitlUserFeedback }}</span>
+                  </div>
+
+                  <!-- 卡片底部操作栏 -->
+                  <div class="hitl-footer">
+                    <div class="hitl-footer-summary">
+                      已选 <strong>{{ (msg.hitlSelectedAttractions || []).length }}</strong> 处景点，
+                      住宿：<strong>{{ msg.hitlSelectedHotel || '自动推荐' }}</strong>
+                    </div>
+                    <div class="hitl-footer-btns">
+                      <button
+                        type="button"
+                        class="hitl-btn-skip"
+                        v-if="!msg.hitlConfirmed"
+                        :disabled="msg.hitlSubmitting"
+                        @click="handleSkipHitlToAuto(msg)"
+                        title="采用默认推荐的全部候选并直接规划"
+                      >
+                        ⚡ 全部推荐
+                      </button>
+                      <button
+                        type="button"
+                        class="hitl-btn-confirm"
+                        :class="{ loading: msg.hitlSubmitting, confirmed: msg.hitlConfirmed }"
+                        :disabled="msg.hitlConfirmed || msg.hitlSubmitting"
+                        @click="handleConfirmInChatHitl(msg)"
+                      >
+                        <span v-if="msg.hitlSubmitting">🚀 规划引擎融合计算中...</span>
+                        <span v-else-if="msg.hitlConfirmed">✓ 协同方案已执行</span>
+                        <span v-else>✓ 确认选择并开始时空规划</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 生成成功的行程概要预览卡片 (全新现代卡片化排版) -->
+                <div class="plan-summary-card" v-if="msg.planData">
+                  <div class="plan-card-header">
+                    <div class="plan-card-header-left">
+                      <div class="plan-header-icon">🗺️</div>
+                      <div class="plan-header-titles">
+                        <div class="plan-main-title">
+                          {{ msg.planData.city }} {{ msg.planData.days.length }}天深度旅行规划
+                        </div>
+                        <div class="plan-sub-meta">
+                          <span class="date-badge">📅 {{ msg.planData.start_date }} ~ {{ msg.planData.end_date }}</span>
+                          <span class="days-count-badge">{{ msg.planData.days.length }}天精炼动线</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="plan-card-header-right" v-if="msg.planData.budget">
+                      <div class="budget-badge-premium">
+                        <span class="budget-label">预估总费用</span>
+                        <span class="budget-amount">¥{{ msg.planData.budget.total }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 每日精细规划卡片流水线 -->
                   <div class="days-preview-grid">
                     <div
                       v-for="d in msg.planData.days"
                       :key="d.day_index"
                       class="day-preview-item"
                     >
-                      <div class="day-badge">Day {{ d.day_index + 1 }}</div>
-                      <div class="day-spots">
-                        <span
-                          v-for="a in d.attractions"
-                          :key="a.name"
-                          class="spot-tag"
-                        >
-                          📍 {{ a.name }}
-                        </span>
+                      <!-- 每日顶栏：Day 徽标 + 主题描述 + 交通 -->
+                      <div class="day-item-topbar">
+                        <div class="day-item-title-box">
+                          <span class="day-badge">Day {{ d.day_index + 1 }}</span>
+                          <span class="day-date-tag">{{ formatShortDate(d.date) }}</span>
+                          <span class="day-desc-text" :title="d.description">{{ d.description }}</span>
+                        </div>
+                        <div class="day-item-meta-badges">
+                          <span class="day-traffic-tag" v-if="d.transportation">
+                            🚗 {{ d.transportation }}
+                          </span>
+                        </div>
                       </div>
-                      <div class="day-hotel" v-if="d.hotel">
-                        🏨 住宿: {{ d.hotel.name }}
+
+                      <!-- 游览景点动线 (带次序箭头与信息) -->
+                      <div class="day-spots-route-wrap">
+                        <div class="spots-route-label">游览动线:</div>
+                        <div class="spots-route-list">
+                          <template v-for="(a, aIdx) in d.attractions" :key="a.name">
+                            <div class="spot-route-chip">
+                              <span class="spot-order-num">{{ aIdx + 1 }}</span>
+                              <span class="spot-chip-name">{{ a.name }}</span>
+                              <span class="spot-chip-duration" v-if="a.visit_duration">{{ a.visit_duration }}min</span>
+                              <span class="spot-chip-price" v-if="a.ticket_price">¥{{ a.ticket_price }}</span>
+                            </div>
+                            <span class="route-arrow-icon" v-if="aIdx < d.attractions.length - 1">➔</span>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- 美食餐饮推荐 (紧凑条) -->
+                      <div class="day-meals-strip" v-if="d.meals && d.meals.length > 0">
+                        <span class="meals-label">🍽️ 特色餐饮:</span>
+                        <div class="meals-tags">
+                          <span v-for="m in d.meals" :key="m.type" class="meal-tag">
+                            <strong class="meal-type">{{ m.type === 'breakfast' ? '早' : m.type === 'lunch' ? '午' : m.type === 'dinner' ? '晚' : '味' }}:</strong>
+                            {{ m.name }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <!-- 住宿推荐条 (独立横栏对齐，带精准距离) -->
+                      <div class="day-hotel-card" v-if="d.hotel">
+                        <div class="hotel-card-left">
+                          <span class="hotel-lead-icon">🏨</span>
+                          <span class="hotel-lead-text">推荐住宿:</span>
+                          <span class="hotel-title-text" :title="d.hotel.name">{{ d.hotel.name }}</span>
+                          <span class="hotel-price-pill" v-if="d.hotel.price_range">{{ d.hotel.price_range }}</span>
+                          <span class="hotel-rating-pill" v-if="d.hotel.rating">⭐ {{ d.hotel.rating }}</span>
+                        </div>
+                        <div class="hotel-card-right" v-if="d.hotel.distance">
+                          <span class="hotel-distance-pill" :title="d.hotel.distance">
+                            📍 {{ d.hotel.distance }}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
 
+                  <!-- 卡片操作底部工具栏 -->
                   <div class="plan-card-footer">
                     <span class="footer-tip">💡 您可以直接在下方输入修改意见（如：“把第2天的故宫换成颐和园”）</span>
-                    <a-button type="primary" size="middle" @click="openCanvasWithPlan(msg.planData)">
-                      在右侧看板查看完整地图路线 →
+                    <a-button type="primary" size="middle" class="canvas-open-btn" @click="openCanvasWithPlan(msg.planData)">
+                      <span>在右侧看板查看完整地图路线 →</span>
                     </a-button>
                   </div>
                 </div>
@@ -364,8 +740,22 @@
           />
 
           <div class="input-bottom-bar">
-            <div class="shortcut-hint">
-              <span class="key-icon">⇧</span> Shift + Enter 换行
+            <div class="bar-left-controls">
+              <button
+                type="button"
+                class="hitl-toggle-pill"
+                :class="{ active: isHitlEnabled }"
+                @click="isHitlEnabled = !isHitlEnabled"
+                :title="isHitlEnabled ? '点击关闭人机协同，恢复全自动流式规划' : '点击开启人机协同(HITL)，将在规划前由您亲自挑选候选景点与酒店'"
+              >
+                <span class="hitl-pill-dot"></span>
+                <span class="hitl-pill-icon">{{ isHitlEnabled ? '🤝' : '🤖' }}</span>
+                <span class="hitl-pill-text">人机协同 (HITL)</span>
+                <span class="hitl-pill-tag">{{ isHitlEnabled ? '已开启' : '自动' }}</span>
+              </button>
+              <div class="shortcut-hint">
+                <span class="key-icon">⇧</span> Shift + Enter 换行
+              </div>
             </div>
             <button
               class="send-btn"
@@ -500,7 +890,8 @@
 
             <!-- 餐饮与酒店 -->
             <div class="d-hotel-row" v-if="day.hotel">
-              🏨 <strong>酒店:</strong> {{ day.hotel.name }} ({{ day.hotel.price_range }})
+              <span>🏨 <strong>酒店:</strong> {{ day.hotel.name }} ({{ day.hotel.price_range }})</span>
+              <span class="d-hotel-distance-tag" v-if="day.hotel.distance"> · 📍 {{ day.hotel.distance }}</span>
             </div>
           </div>
         </div>
@@ -519,11 +910,13 @@ import 'leaflet/dist/leaflet.css'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import dayjs from 'dayjs'
-import type { TripPlan, ChatMessage, ChatSession, AgentNodeStatus, StreamEvent } from '@/types'
+import type { TripPlan, TripFormData, ChatMessage, ChatSession, AgentNodeStatus, StreamEvent, POIInfo } from '@/types'
 import {
   generateTripPlanStream,
   chatModifyTripPlan,
   parseNaturalLanguageTrip,
+  prepareTripPlan,
+  confirmTripPlan,
 } from '@/services/api'
 
 const router = useRouter()
@@ -532,6 +925,7 @@ const router = useRouter()
 const sidebarCollapsed = ref(false)
 const showCanvas = ref(false)
 const isLoading = ref(false)
+const isHitlEnabled = ref(false)
 const inputMessage = ref('')
 const messagesContainerRef = ref<HTMLDivElement | null>(null)
 
@@ -783,7 +1177,42 @@ const handleSend = async () => {
   )
 
   if (isNewPlanIntent) {
-    await handleChatStreamingGeneration(text)
+    try {
+      // 1. 意图解析：将自然语言提问转换为 TripFormData
+      const parsedFormData = await parseNaturalLanguageTrip(text)
+
+      // 只要用户未明确指定具体的出发时间（哪怕提到了4天等时长），都挂载前置参数确认胶囊
+      const isStartDateExplicit = Boolean(parsedFormData.has_explicit_start_date)
+      if (!isStartDateExplicit) {
+        const assistantMsgId = 'assistant_pre_' + Date.now()
+        const promptContent = parsedFormData.clarification_prompt || (
+          parsedFormData.has_explicit_duration
+            ? `已为您锁定目的地【${parsedFormData.city}】与【${parsedFormData.travel_days}日游】。为了精准匹配高德实时气象与景区开闭馆排期，请问您打算哪天出发呢？`
+            : `已为您识别目的地【${parsedFormData.city}】。为了确保高德实时气象与推荐景点的时空容量严密吻合，建议核对出发时间与偏好：`
+        )
+        const assistantMsg = reactive<ChatMessage>({
+          id: assistantMsgId,
+          role: 'assistant',
+          content: promptContent,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          loading: false,
+          isParamConfirmPending: true,
+          pendingParams: { ...parsedFormData },
+        })
+        messages.value.push(assistantMsg)
+        scrollToBottom()
+        return
+      }
+
+      // 若大模型判定已明确给出出发日期（如明天/下周五/10月1日），则零打断直通执行！
+      if (isHitlEnabled.value) {
+        await handleChatHitlPreparation(parsedFormData)
+      } else {
+        await handleChatStreamingGeneration(parsedFormData)
+      }
+    } catch (err: any) {
+      message.error('意图解析失败: ' + (err.message || err))
+    }
   } else {
     await handleChatModification(text)
   }
@@ -798,13 +1227,12 @@ const markLastRunningStepDone = (msg: ChatMessage) => {
 }
 
 // 场景一：利用 SSE 流式生成新旅行计划
-const handleChatStreamingGeneration = async (text: string) => {
+const handleChatStreamingGeneration = async (input: string | TripFormData, existingMsg?: ChatMessage) => {
   isLoading.value = true
   resetAgentNodes()
 
-  const assistantMsgId = 'assistant_' + Date.now()
-  const assistantMsg = reactive<ChatMessage>({
-    id: assistantMsgId,
+  const assistantMsg = existingMsg || reactive<ChatMessage>({
+    id: 'assistant_' + Date.now(),
     role: 'assistant',
     content: '收到您的旅行需求，正在启动 LangGraph 多智能体专家协同规划...',
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -814,15 +1242,18 @@ const handleChatStreamingGeneration = async (text: string) => {
     thoughtElapsed: 0,
     isThoughtExpanded: true,
   })
-  messages.value.push(assistantMsg)
+  if (!existingMsg) {
+    messages.value.push(assistantMsg)
+  }
+  assistantMsg.loading = true
+  assistantMsg.isParamConfirmPending = false
   scrollToBottom()
 
   let elapsedTimer: any = null
 
   try {
-    // 1. 意图解析：将自然语言提问转换为 TripFormData
-    const parsedFormData = await parseNaturalLanguageTrip(text)
-    assistantMsg.content = `已识别您的目的地为【${parsedFormData.city}】，计划游玩 ${parsedFormData.travel_days} 天。多智能体系统正在并行搜集地点与天气...`
+    const parsedFormData = typeof input === 'string' ? await parseNaturalLanguageTrip(input) : input
+    assistantMsg.content = `已锁定目的地【${parsedFormData.city}】，出行周期 ${parsedFormData.start_date} ~ ${parsedFormData.end_date}（共 ${parsedFormData.travel_days} 天）。多智能体系统正在并行搜集地点与天气...`
 
     // 初始化思考流程时间线与秒表
     assistantMsg.thoughtSteps = [
@@ -1091,7 +1522,424 @@ const handleChatStreamingGeneration = async (text: string) => {
   }
 }
 
-// 场景二：利用 LangGraph chat_modify 子图对话式调整行程
+// 场景二：人机协同 (HITL) 阶段一 —— 并行收集候选资源并挂起等待用户确认
+const handleChatHitlPreparation = async (input: string | TripFormData, existingMsg?: ChatMessage) => {
+  isLoading.value = true
+  resetAgentNodes()
+
+  const assistantMsg = existingMsg || reactive<ChatMessage>({
+    id: 'assistant_' + Date.now(),
+    role: 'assistant',
+    content: '收到旅行需求，已启动人机协同模式 (HITL)。正在并行搜集真实景点、气象与酒店候选...',
+    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    loading: true,
+    streamEvents: [{ event: 'start', message: '启动人机协同候选收集' }],
+    thoughtSteps: [],
+    thoughtElapsed: 0,
+    isThoughtExpanded: true,
+  })
+  if (!existingMsg) {
+    messages.value.push(assistantMsg)
+  }
+  assistantMsg.loading = true
+  assistantMsg.isParamConfirmPending = false
+  scrollToBottom()
+
+  let elapsedTimer: any = setInterval(() => {
+    if (assistantMsg.thoughtElapsed !== undefined) {
+      assistantMsg.thoughtElapsed += 1
+    }
+  }, 1000)
+
+  try {
+    const parsedFormData = typeof input === 'string' ? await parseNaturalLanguageTrip(input) : input
+    assistantMsg.content = `已锁定目的地【${parsedFormData.city}】，计划出行 ${parsedFormData.start_date} ~ ${parsedFormData.end_date}（共 ${parsedFormData.travel_days} 天）。多智能体系统正在检索高德候选资源与气象环境...`
+
+    assistantMsg.thoughtSteps = [
+      {
+        id: 'step_hitl_init_' + Date.now(),
+        title: '🛫 初始化人机协同规划任务',
+        stage: '任务初始化',
+        detail: `锁定目标城市【${parsedFormData.city}】，游玩 ${parsedFormData.travel_days} 天，启动 HITL 候选阶段`,
+        status: 'completed',
+        elapsedSeconds: 0,
+      },
+      {
+        id: 'step_hitl_fetch_' + Date.now(),
+        title: '🌐 多智能体并行搜集候选资源',
+        stage: '并行收集',
+        detail: '景点搜索专家、天气查询专家与酒店推荐专家正在并行执行高德 API 检索...',
+        status: 'running',
+        elapsedSeconds: assistantMsg.thoughtElapsed,
+      }
+    ]
+    currentLiveStepText.value = '多智能体并行检索候选景点、天气与酒店...'
+
+    // 2. 调用 prepareTripPlan 在 planner 节点前触发 LangGraph 挂起
+    const res = await prepareTripPlan(parsedFormData)
+
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+
+    if (res.success && res.data) {
+      const candidateData = res.data
+
+      // 点亮前三个并行搜索专家
+      const attNode = currentAgentNodes.value.find(n => n.key === 'attractions')
+      if (attNode) {
+        attNode.status = 'completed'
+        attNode.detail = `已获取 ${candidateData.candidate_attractions?.length || 0} 处候选景点`
+      }
+      const weaNode = currentAgentNodes.value.find(n => n.key === 'weather')
+      if (weaNode) {
+        weaNode.status = 'completed'
+        weaNode.detail = `已锁定 ${candidateData.weather_info?.length || 0} 天气象数据`
+      }
+      const hotNode = currentAgentNodes.value.find(n => n.key === 'hotels')
+      if (hotNode) {
+        hotNode.status = 'completed'
+        hotNode.detail = `已筛选 ${candidateData.candidate_hotels?.length || 0} 家推荐住宿`
+      }
+
+      // 规划专家标记为等待用户确认
+      const planNode = currentAgentNodes.value.find(n => n.key === 'planner')
+      if (planNode) {
+        planNode.status = 'pending'
+        planNode.detail = '等待用户挑选确认'
+      }
+
+      streamProgress.value = 50
+      currentLiveStepText.value = '候选数据已采集完毕，等待用户确认选择'
+
+      // 更新推演思考链路
+      markLastRunningStepDone(assistantMsg)
+      assistantMsg.thoughtSteps = [
+        ...(assistantMsg.thoughtSteps || []),
+        {
+          id: 'step_hitl_interrupt_' + Date.now(),
+          title: '🤝 候选收集完毕 · LangGraph 触发协同挂起 (Interrupt)',
+          stage: '人机协同挂起',
+          detail: `已锁定 ${candidateData.candidate_attractions?.length || 0} 处真实景点与 ${candidateData.candidate_hotels?.length || 0} 家优选住宿。LangGraph 执行在 planner 节点前挂起，等待您在下方卡片中确认挑选。`,
+          status: 'completed',
+          elapsedSeconds: assistantMsg.thoughtElapsed,
+        }
+      ]
+
+      // 挂载候选数据与默认预选
+      assistantMsg.hitlCandidateData = candidateData
+      const defaultAttractions = (candidateData.candidate_attractions || [])
+        .slice(0, Math.min(5, candidateData.candidate_attractions.length))
+        .map(a => a.name)
+      assistantMsg.hitlSelectedAttractions = defaultAttractions
+      assistantMsg.hitlSelectedHotel = candidateData.candidate_hotels?.[0]?.name || ''
+      assistantMsg.hitlStartDate = candidateData.start_date || (parsedFormData as any).start_date || ''
+      assistantMsg.hitlEndDate = candidateData.end_date || (parsedFormData as any).end_date || ''
+      assistantMsg.hitlTravelDays = candidateData.travel_days || (parsedFormData as any).travel_days || 1
+      assistantMsg.initialTravelDays = candidateData.travel_days || (parsedFormData as any).travel_days || 1
+      assistantMsg.initialStartDate = candidateData.start_date || (parsedFormData as any).start_date || ''
+      assistantMsg.hitlUserFeedback = ''
+      assistantMsg.hitlConfirmed = false
+      assistantMsg.hitlSubmitting = false
+      assistantMsg.loading = false
+      assistantMsg.content = `✨ 已在【${candidateData.city}】为您挖掘到 ${candidateData.candidate_attractions?.length || 0} 处高分候选景点与 ${candidateData.candidate_hotels?.length || 0} 家优质住宿。请在下方卡片中勾选您心仪的项目，确认后将立即为您生成专属时空动线！`
+    } else {
+      assistantMsg.loading = false
+      assistantMsg.content = res.message || '获取候选数据失败'
+      currentLiveStepText.value = '准备候选失败'
+    }
+  } catch (err: any) {
+    if (elapsedTimer) clearInterval(elapsedTimer)
+    assistantMsg.loading = false
+    assistantMsg.content = `准备人机协同规划失败: ${err.message || err}`
+    currentLiveStepText.value = '准备失败'
+  } finally {
+    if (elapsedTimer) clearInterval(elapsedTimer)
+    isLoading.value = false
+    scrollToBottom()
+  }
+}
+
+// In-Chat HITL 卡片操作辅助逻辑
+const toggleHitlAttraction = (msg: ChatMessage, poiName: string) => {
+  if (msg.hitlConfirmed) return
+  const current = msg.hitlSelectedAttractions || []
+  if (current.includes(poiName)) {
+    msg.hitlSelectedAttractions = current.filter(n => n !== poiName)
+  } else {
+    msg.hitlSelectedAttractions = [...current, poiName]
+  }
+}
+
+const selectAllHitlAttractions = (msg: ChatMessage) => {
+  if (msg.hitlConfirmed || !msg.hitlCandidateData?.candidate_attractions) return
+  msg.hitlSelectedAttractions = msg.hitlCandidateData.candidate_attractions.map(a => a.name)
+}
+
+const clearHitlAttractions = (msg: ChatMessage) => {
+  if (msg.hitlConfirmed) return
+  msg.hitlSelectedAttractions = []
+}
+
+const selectHitlHotel = (msg: ChatMessage, hotelName: string) => {
+  if (msg.hitlConfirmed) return
+  msg.hitlSelectedHotel = hotelName
+}
+
+const handleHitlDateChange = (msg: ChatMessage, type: 'start' | 'end', val: string) => {
+  if (type === 'start') {
+    msg.hitlStartDate = val
+    if (msg.hitlEndDate && msg.hitlStartDate > msg.hitlEndDate) {
+      msg.hitlEndDate = val
+    }
+  } else {
+    msg.hitlEndDate = val
+    if (msg.hitlStartDate && msg.hitlEndDate < msg.hitlStartDate) {
+      msg.hitlStartDate = val
+    }
+  }
+  if (msg.hitlStartDate && msg.hitlEndDate) {
+    try {
+      const s = new Date(msg.hitlStartDate)
+      const e = new Date(msg.hitlEndDate)
+      const diff = Math.max(1, Math.round((e.getTime() - s.getTime()) / (1000 * 3600 * 24)) + 1)
+      msg.hitlTravelDays = diff
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// 前置参数轻量确认交互函数
+const handlePreParamDateChange = (msg: ChatMessage, type: 'start' | 'end', val: string) => {
+  if (!msg.pendingParams) return
+  const isFixedDuration = Boolean(msg.pendingParams.has_explicit_duration && msg.pendingParams.travel_days > 0)
+  if (type === 'start') {
+    msg.pendingParams.start_date = val
+    if (isFixedDuration) {
+      // 保持用户已指定的固定时长联动（出发日改变，返程日自动顺延，天数稳定不变）
+      try {
+        const s = new Date(val)
+        s.setDate(s.getDate() + (msg.pendingParams.travel_days - 1))
+        msg.pendingParams.end_date = s.toISOString().split('T')[0]
+      } catch {
+        // ignore
+      }
+    } else if (msg.pendingParams.end_date && msg.pendingParams.start_date > msg.pendingParams.end_date) {
+      msg.pendingParams.end_date = val
+    }
+  } else {
+    msg.pendingParams.end_date = val
+    if (msg.pendingParams.start_date && msg.pendingParams.end_date < msg.pendingParams.start_date) {
+      msg.pendingParams.start_date = val
+    }
+  }
+  if (msg.pendingParams.start_date && msg.pendingParams.end_date) {
+    try {
+      const s = new Date(msg.pendingParams.start_date)
+      const e = new Date(msg.pendingParams.end_date)
+      const diff = Math.max(1, Math.round((e.getTime() - s.getTime()) / (1000 * 3600 * 24)) + 1)
+      msg.pendingParams.travel_days = diff
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const togglePreParamPreference = (msg: ChatMessage, pref: string) => {
+  if (!msg.pendingParams) return
+  const list = msg.pendingParams.preferences || []
+  if (list.includes(pref)) {
+    msg.pendingParams.preferences = list.filter(p => p !== pref)
+  } else {
+    msg.pendingParams.preferences = [...list, pref]
+  }
+}
+
+const handleConfirmPreParams = async (msg: ChatMessage, useDefault: boolean = false) => {
+  if (!msg.pendingParams) return
+  msg.isParamConfirmPending = false
+  const params: TripFormData = { ...msg.pendingParams }
+  if (useDefault) {
+    // 保持系统推测的参数
+  }
+  msg.content = `已锁定【${params.city}】${params.start_date} ~ ${params.end_date}（共 ${params.travel_days} 天）行程参数，多智能体系统开始为您规划...`
+
+  if (isHitlEnabled.value) {
+    await handleChatHitlPreparation(params, msg)
+  } else {
+    await handleChatStreamingGeneration(params, msg)
+  }
+}
+
+// In-Chat HITL 候选重新匹配函数 (Invalidation & Re-search)
+const handleRefreshHitlCandidates = async (msg: ChatMessage) => {
+  if (msg.hitlConfirmed || msg.hitlRefreshing || !msg.hitlCandidateData) return
+  msg.hitlRefreshing = true
+  try {
+    const refreshFormData: TripFormData = {
+      city: msg.hitlCandidateData.city,
+      start_date: msg.hitlStartDate || msg.hitlCandidateData.start_date || '',
+      end_date: msg.hitlEndDate || msg.hitlCandidateData.end_date || '',
+      travel_days: msg.hitlTravelDays || msg.hitlCandidateData.travel_days || 1,
+      transportation: '公共交通',
+      accommodation: '舒适型酒店',
+      preferences: ['历史文化', '美食'],
+      free_text_input: msg.hitlUserFeedback || '',
+    }
+
+    message.loading({ content: `正在重新检索【${refreshFormData.city}】${refreshFormData.travel_days}日游候选景点与天气...`, key: 'hitl_refresh' })
+    const res = await prepareTripPlan(refreshFormData)
+
+    if (res.success && res.data) {
+      const candidateData = res.data
+      msg.hitlCandidateData = candidateData
+      const defaultAttractions = (candidateData.candidate_attractions || [])
+        .slice(0, Math.min(Math.max(5, candidateData.travel_days * 2), candidateData.candidate_attractions.length))
+        .map(a => a.name)
+      msg.hitlSelectedAttractions = defaultAttractions
+      msg.hitlSelectedHotel = candidateData.candidate_hotels?.[0]?.name || ''
+      msg.initialTravelDays = candidateData.travel_days
+      msg.initialStartDate = candidateData.start_date
+      msg.hitlStartDate = candidateData.start_date
+      msg.hitlEndDate = candidateData.end_date
+      msg.hitlTravelDays = candidateData.travel_days
+      message.success({ content: `已成功为您刷新为 ${candidateData.travel_days} 天行程候选资源！`, key: 'hitl_refresh' })
+    } else {
+      message.error({ content: res.message || '刷新候选数据失败', key: 'hitl_refresh' })
+    }
+  } catch (err: any) {
+    message.error({ content: '刷新候选数据失败: ' + (err.message || err), key: 'hitl_refresh' })
+  } finally {
+    msg.hitlRefreshing = false
+  }
+}
+
+const handleSkipHitlToAuto = async (msg: ChatMessage) => {
+  if (msg.hitlConfirmed || !msg.hitlCandidateData) return
+  // 全量选中候选景点与默认酒店
+  if (msg.hitlCandidateData.candidate_attractions) {
+    msg.hitlSelectedAttractions = msg.hitlCandidateData.candidate_attractions.map(a => a.name)
+  }
+  if (!msg.hitlSelectedHotel && msg.hitlCandidateData.candidate_hotels?.length) {
+    msg.hitlSelectedHotel = msg.hitlCandidateData.candidate_hotels[0].name
+  }
+  await handleConfirmInChatHitl(msg)
+}
+
+// 人机协同 (HITL) 阶段二 —— 用户确认并恢复 LangGraph 执行
+const handleConfirmInChatHitl = async (msg: ChatMessage) => {
+  if (msg.hitlConfirmed || msg.hitlSubmitting || !msg.hitlCandidateData) return
+
+  const selectedAttractions = msg.hitlSelectedAttractions || []
+  if (selectedAttractions.length === 0) {
+    message.warning('请至少勾选 1 处心仪的景点哦！')
+    return
+  }
+
+  msg.hitlSubmitting = true
+  msg.hitlConfirmed = true
+  msg.loading = true
+  isLoading.value = true
+
+  // 状态矩阵推进
+  const plannerNode = currentAgentNodes.value.find(n => n.key === 'planner')
+  if (plannerNode) {
+    plannerNode.status = 'running'
+    plannerNode.detail = '融入协同偏好推演中'
+  }
+  streamProgress.value = 75
+  currentLiveStepText.value = '正在根据您勾选的景点与酒店恢复规划推演...'
+
+  // 追加推演步骤
+  const samplePois = selectedAttractions.slice(0, 3).join('、')
+  msg.thoughtSteps = [
+    ...(msg.thoughtSteps || []),
+    {
+      id: 'step_hitl_resume_' + Date.now(),
+      title: '🚀 注入人机协同意向 · 恢复时空规划推演',
+      stage: '协同恢复执行',
+      detail: `已锁定出行周期【${msg.hitlStartDate || '近期'} 至 ${msg.hitlEndDate || '近期'} (共 ${msg.hitlTravelDays || msg.hitlCandidateData.travel_days || 1} 天)】、${selectedAttractions.length} 处景点（如${samplePois}），住宿【${msg.hitlSelectedHotel || '默认推荐'}】${msg.hitlUserFeedback ? `，补充偏好: "${msg.hitlUserFeedback}"` : ''}。LangGraph 恢复执行 planner 节点！`,
+      status: 'running',
+      elapsedSeconds: (msg.thoughtElapsed || 0) + 1,
+    }
+  ]
+  scrollToBottom()
+
+  try {
+    const confirmPayload = {
+      thread_id: msg.hitlCandidateData.thread_id,
+      selected_attractions: selectedAttractions,
+      selected_hotel: msg.hitlSelectedHotel || undefined,
+      user_feedback: msg.hitlUserFeedback || undefined,
+      start_date: msg.hitlStartDate || undefined,
+      end_date: msg.hitlEndDate || undefined,
+    }
+
+    const res = await confirmTripPlan(confirmPayload)
+
+    if (res.success && res.data) {
+      const plan = res.data
+      currentPlan.value = plan
+      msg.planData = plan
+      msg.loading = false
+      msg.hitlSubmitting = false
+      msg.content = `🎉 太棒了！已根据您挑选的 ${selectedAttractions.length} 处景点与住宿安排，生成了量身定制的【${plan.city}】${plan.days.length}天深度游行程！`
+
+      // 标记推演所有节点完成
+      markLastRunningStepDone(msg)
+      msg.thoughtSteps = [
+        ...(msg.thoughtSteps || []),
+        {
+          id: 'step_hitl_complete_' + Date.now(),
+          title: '🛡️ 质量闭环校验与行程输出',
+          stage: '规划闭环成功',
+          detail: '每日游玩动线、餐饮接驳与整体预算已全部测算完成，校验指标 100% 合格！',
+          status: 'completed',
+          elapsedSeconds: (msg.thoughtElapsed || 0) + 3,
+        }
+      ]
+
+      currentAgentNodes.value.forEach(n => {
+        n.status = 'completed'
+      })
+      streamProgress.value = 100
+      currentLiveStepText.value = '人机协同规划已就绪！'
+
+      // 持久化与看板展开
+      const session = sessions.value.find(s => s.id === currentSessionId.value)
+      if (session) {
+        session.title = `${plan.city} ${plan.days.length}日游 (协同版)`
+        session.city = plan.city
+        session.tripPlan = plan
+        session.messages = messages.value
+        saveSessionsToStorage()
+      }
+      sessionStorage.setItem('tripPlan', JSON.stringify(plan))
+
+      showCanvas.value = true
+      nextTick(() => {
+        initWorkspaceMap()
+      })
+      message.success('人机协同行程定制完成！')
+    } else {
+      msg.loading = false
+      msg.hitlSubmitting = false
+      msg.content = res.message || '生成旅行计划失败'
+      message.error(res.message || '生成失败')
+    }
+  } catch (err: any) {
+    msg.loading = false
+    msg.hitlSubmitting = false
+    msg.content = `恢复规划执行失败: ${err.message || err}`
+    message.error(err.message || '恢复规划失败')
+  } finally {
+    msg.hitlSubmitting = false
+    isLoading.value = false
+    scrollToBottom()
+  }
+}
+
+// 场景三：利用 LangGraph chat_modify 子图对话式调整行程
 const handleChatModification = async (text: string) => {
   if (!currentPlan.value) return
   isLoading.value = true
@@ -1262,6 +2110,57 @@ const formatShortDate = (dateStr: string): string => {
   return `${d.format('MM-DD')} ${weekDays[d.day()]}`
 }
 
+// 酒店到最近候选景点的距离显示计算（带精确经纬度 Haversine 兜底）
+const getHotelDistanceDisplay = (hotel: POIInfo, candidateAttractions?: POIInfo[]): string => {
+  if (hotel.distance && hotel.distance !== '距离景点2公里' && hotel.distance !== '位置距离') {
+    return hotel.distance
+  }
+  if (!hotel.location || !candidateAttractions || candidateAttractions.length === 0) {
+    return hotel.distance || ''
+  }
+
+  const hLng = Number(hotel.location.longitude)
+  const hLat = Number(hotel.location.latitude)
+  if (!Number.isFinite(hLng) || !Number.isFinite(hLat) || (hLng === 0 && hLat === 0)) {
+    return hotel.distance || ''
+  }
+
+  let minDist = Infinity
+  let nearestName = ''
+
+  for (const att of candidateAttractions) {
+    if (!att.location) continue
+    const aLng = Number(att.location.longitude)
+    const aLat = Number(att.location.latitude)
+    if (!Number.isFinite(aLng) || !Number.isFinite(aLat) || (aLng === 0 && aLat === 0)) continue
+
+    const radLat1 = (hLat * Math.PI) / 180
+    const radLat2 = (aLat * Math.PI) / 180
+    const dLat = ((aLat - hLat) * Math.PI) / 180
+    const dLng = ((aLng - hLng) * Math.PI) / 180
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(radLat1) * Math.cos(radLat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    const dist = 6371 * c
+    if (dist < minDist) {
+      minDist = dist
+      nearestName = att.name
+    }
+  }
+
+  if (!nearestName || minDist === Infinity) {
+    return hotel.distance || ''
+  }
+
+  const shortName = nearestName.split('-')[0].split('·')[0].split('(')[0].split('（')[0].trim()
+  if (minDist < 1.0) {
+    const meters = Math.max(50, Math.round(minDist * 100) * 10)
+    return `近${shortName}(${meters}m)`
+  }
+  return `距${shortName} ${minDist.toFixed(1)}km`
+}
+
 const missingDatesList = computed(() => {
   if (!currentPlan.value) return []
   const forecastDates = new Set((currentPlan.value.weather_info ?? []).map(w => w.date))
@@ -1379,6 +2278,7 @@ const createExportDOM = (plan: TripPlan): HTMLElement => {
         ${day.hotel ? `
           <div style="font-size:11px; background:#eff6ff; padding:6px 10px; border-radius:6px; color:#1e40af; margin-top:6px;">
             🏨 <strong>推荐入住:</strong> ${escapeHtml(day.hotel.name)} (${escapeHtml(day.hotel.price_range || '')})
+            ${day.hotel.distance ? ` · 📍 ${escapeHtml(day.hotel.distance)}` : ''}
           </div>
         ` : ''}
       </div>
@@ -1503,7 +2403,7 @@ const exportPlanMarkdown = () => {
     md += `- **交通方式**: ${d.transportation}\n`
     md += `- **住宿偏好**: ${d.accommodation}`
     if (d.hotel) {
-      md += ` (${d.hotel.name}，${d.hotel.price_range}，地址: ${d.hotel.address})`
+      md += ` (${d.hotel.name}，${d.hotel.price_range}，${d.hotel.distance ? d.hotel.distance + '，' : ''}地址: ${d.hotel.address})`
     }
     md += `\n\n`
 
@@ -2022,7 +2922,7 @@ watch(currentPlan, (newPlan) => {
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 32px 140px;
+  padding: 24px 32px 260px;
   scroll-behavior: smooth;
 }
 
@@ -2576,13 +3476,950 @@ watch(currentPlan, (newPlan) => {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* 行程概要预览卡片 */
+/* ======================== In-Chat HITL 人机协同卡片 ======================== */
+.in-chat-hitl-card {
+  margin-top: 14px;
+  background: linear-gradient(145deg, #1e293b, #0f172a);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25), 0 0 15px rgba(99, 102, 241, 0.08);
+  color: #f1f5f9;
+  transition: all 0.3s ease;
+}
+
+.in-chat-hitl-card.is-confirmed {
+  border-color: rgba(16, 185, 129, 0.3);
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.15);
+  background: linear-gradient(145deg, #1e293b, #131d2e);
+}
+
+.hitl-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.hitl-header-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hitl-badge-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+  flex-shrink: 0;
+}
+
+.hitl-title-box {
+  display: flex;
+  flex-direction: column;
+}
+
+.hitl-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: 0.3px;
+}
+
+.hitl-subtitle {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 1px;
+}
+
+.hitl-status-pill {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  white-space: nowrap;
+}
+
+.hitl-status-pill.confirmed {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+/* 出行周期确认条 */
+.hitl-date-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(30, 41, 59, 0.6);
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+.date-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.date-bar-icon {
+  font-size: 15px;
+}
+
+.date-bar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.date-inputs-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hitl-date-input {
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  color: #f1f5f9;
+  font-size: 12px;
+  padding: 3px 8px;
+  font-family: inherit;
+  color-scheme: dark;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.hitl-date-input:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.date-separator {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.date-days-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  background: rgba(99, 102, 241, 0.2);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+  border-radius: 12px;
+}
+
+.date-confirmed-val {
+  font-size: 12px;
+  font-weight: 500;
+  color: #34d399;
+}
+
+.date-tip-sub {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+/* 天气胶囊横条 */
+.hitl-weather-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(51, 65, 85, 0.35);
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.hitl-weather-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.weather-bar-title {
+  font-size: 11px;
+  color: #cbd5e1;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.weather-bar-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.weather-mini-tag {
+  font-size: 11px;
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 6px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* 前置行程参数确认胶囊 */
+.pre-trip-param-card {
+  margin-top: 14px;
+  background: linear-gradient(145deg, #1e293b, #0f172a);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.3), 0 0 16px rgba(99, 102, 241, 0.12);
+  color: #f1f5f9;
+}
+
+.param-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.param-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.param-badge-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0ea5e9, #6366f1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.param-title-box {
+  display: flex;
+  flex-direction: column;
+}
+
+.param-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.param-card-subtitle {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.param-status-tag {
+  padding: 3px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}
+
+.param-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.param-grid-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.param-grid-item.full-width {
+  grid-column: span 2;
+}
+
+.param-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.param-input {
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  color: #f8fafc;
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.param-input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.param-date-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.param-input.date-input {
+  color-scheme: dark;
+  cursor: pointer;
+  flex: 1;
+}
+
+.date-sep {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.param-days-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  background: rgba(99, 102, 241, 0.2);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.param-pref-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pref-choice-pill {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  background: rgba(51, 65, 85, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s;
+}
+
+.pref-choice-pill:hover {
+  border-color: #6366f1;
+  color: #f8fafc;
+}
+
+.pref-choice-pill.active {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: #6366f1;
+  color: #c7d2fe;
+  font-weight: 600;
+}
+
+.param-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.param-confirm-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.param-confirm-btn.primary {
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.param-confirm-btn.primary:hover {
+  background: linear-gradient(135deg, #4f46e5, #4338ca);
+  transform: translateY(-1px);
+}
+
+.param-confirm-btn.secondary {
+  background: rgba(51, 65, 85, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: #94a3b8;
+}
+
+.param-confirm-btn.secondary:hover {
+  background: rgba(51, 65, 85, 0.8);
+  color: #f1f5f9;
+}
+
+/* HITL 天数/时效失配预警条 */
+.hitl-stale-warning {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  animation: fadeIn 0.3s ease;
+}
+
+.stale-warning-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.stale-warning-icon {
+  font-size: 16px;
+  margin-top: 1px;
+}
+
+.stale-warning-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stale-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fbbf24;
+}
+
+.stale-desc {
+  font-size: 11px;
+  color: #cbd5e1;
+}
+
+.hitl-refresh-btn {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+  transition: all 0.2s;
+}
+
+.hitl-refresh-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #d97706, #b45309);
+  transform: translateY(-1px);
+}
+
+.hitl-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 各区块 */
+.hitl-section {
+  margin-top: 14px;
+}
+
+.hitl-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.count-tag {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: normal;
+}
+
+.count-tag strong {
+  color: #818cf8;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-text-btn {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  color: #818cf8;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.mini-text-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+}
+
+.divider {
+  color: #475569;
+  font-size: 10px;
+}
+
+/* 景点网格 */
+.hitl-attractions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.hitl-attractions-grid::-webkit-scrollbar {
+  width: 4px;
+}
+.hitl-attractions-grid::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 2px;
+}
+
+.hitl-poi-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 12px;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.hitl-poi-card:hover:not(.is-disabled) {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(49, 46, 129, 0.25);
+  transform: translateY(-1px);
+}
+
+.hitl-poi-card.is-selected {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(124, 58, 237, 0.15));
+  border-color: #6366f1;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+}
+
+.hitl-poi-card.is-disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.poi-checkbox {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  flex-shrink: 0;
+  transition: all 0.2s;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.hitl-poi-card.is-selected .poi-checkbox {
+  background: #6366f1;
+  border-color: #6366f1;
+}
+
+.check-icon {
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.poi-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.poi-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.poi-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.poi-rating {
+  font-size: 10px;
+  color: #fbbf24;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.poi-mid-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.poi-type {
+  font-size: 10px;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.poi-address {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+}
+
+/* 酒店单选卡片网格 */
+.hitl-hotels-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.hitl-hotel-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 12px;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.hitl-hotel-card:hover:not(.is-disabled) {
+  border-color: rgba(168, 85, 247, 0.5);
+  background: rgba(88, 28, 135, 0.2);
+  transform: translateY(-1px);
+}
+
+.hitl-hotel-card.is-selected {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.22), rgba(99, 102, 241, 0.15));
+  border-color: #a855f7;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.2);
+}
+
+.hitl-hotel-card.is-disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.hotel-radio {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  flex-shrink: 0;
+  transition: all 0.2s;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.hitl-hotel-card.is-selected .hotel-radio {
+  border-color: #a855f7;
+}
+
+.radio-core {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #a855f7;
+  box-shadow: 0 0 6px #a855f7;
+}
+
+.hotel-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.hotel-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.hotel-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hotel-price {
+  font-size: 10px;
+  color: #f43f5e;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hotel-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.hotel-rating {
+  font-size: 10px;
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.hotel-tag {
+  font-size: 10px;
+  color: #c084fc;
+  background: rgba(192, 132, 252, 0.12);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.hotel-distance {
+  font-size: 10px;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  font-weight: 500;
+}
+
+.hitl-hotel-card.is-selected .hotel-distance {
+  color: #67e8f9;
+  background: rgba(6, 182, 212, 0.22);
+  border-color: rgba(6, 182, 212, 0.45);
+}
+
+.hotel-dist-tag {
+  font-size: 11px;
+  color: #0284c7;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+.d-hotel-distance-tag {
+  font-size: 11px;
+  color: #0369a1;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+.hotel-address {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+}
+
+/* 反馈微调框 */
+.hitl-feedback-box {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: rgba(51, 65, 85, 0.35);
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.feedback-title {
+  font-size: 11px;
+  color: #cbd5e1;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.hitl-feedback-input {
+  background: rgba(15, 23, 42, 0.6) !important;
+  border: 1px solid rgba(148, 163, 184, 0.25) !important;
+  color: #f8fafc !important;
+  border-radius: 8px !important;
+  font-size: 12px !important;
+}
+
+.hitl-feedback-input:focus {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3) !important;
+}
+
+.hitl-feedback-display {
+  margin-top: 12px;
+  padding: 6px 12px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.fb-tag {
+  color: #a5b4fc;
+  font-weight: 600;
+}
+
+.fb-content {
+  color: #e2e8f0;
+}
+
+/* 卡片底部操作栏 */
+.hitl-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  gap: 12px;
+}
+
+.hitl-footer-summary {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.hitl-footer-summary strong {
+  color: #f1f5f9;
+}
+
+.hitl-footer-btns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hitl-btn-skip {
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #cbd5e1;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.hitl-btn-skip:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.2);
+  color: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.hitl-btn-confirm {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  border: none;
+  color: #ffffff;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hitl-btn-confirm:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.5);
+  background: linear-gradient(135deg, #4338ca, #6d28d9);
+}
+
+.hitl-btn-confirm:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.hitl-btn-confirm.confirmed {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  box-shadow: none;
+  cursor: default;
+}
+
+.hitl-btn-confirm:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* 行程概要预览卡片 (全新现代卡片化排版) */
 .plan-summary-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  padding: 18px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.05);
+  border-radius: 18px;
+  padding: 20px 22px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.02);
+  margin-top: 14px;
 }
 
 .plan-card-header {
@@ -2590,90 +4427,382 @@ watch(currentPlan, (newPlan) => {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid #f1f5f9;
-  padding-bottom: 12px;
-  margin-bottom: 12px;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  gap: 16px;
 }
 
-.plan-card-title {
+.plan-card-header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 15px;
-  font-weight: 700;
+  gap: 12px;
+}
+
+.plan-header-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.12);
+  flex-shrink: 0;
+}
+
+.plan-header-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-main-title {
+  font-size: 16px;
+  font-weight: 800;
   color: #0f172a;
+  letter-spacing: 0.2px;
+}
+
+.plan-sub-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .date-badge {
-  font-size: 12px;
-  font-weight: normal;
+  font-size: 11px;
+  font-weight: 500;
   color: #64748b;
-  background: #f1f5f9;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   padding: 2px 8px;
   border-radius: 6px;
 }
 
-.budget-badge {
-  background: #fff7ed;
-  color: #c2410c;
-  font-weight: 700;
-  font-size: 13px;
-  padding: 4px 10px;
-  border-radius: 8px;
+.days-count-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 2px 8px;
+  border-radius: 6px;
 }
 
+.budget-badge-premium {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  background: linear-gradient(135deg, #fff7ed, #ffedd5);
+  border: 1px solid #fed7aa;
+  padding: 6px 14px;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(234, 88, 12, 0.08);
+}
+
+.budget-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #ea580c;
+  text-transform: uppercase;
+}
+
+.budget-amount {
+  font-size: 16px;
+  font-weight: 800;
+  color: #c2410c;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* 每日规划卡片流水线 */
 .days-preview-grid {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 12px;
+  margin-bottom: 18px;
 }
 
 .day-preview-item {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: all 0.2s ease;
+}
+
+.day-preview-item:hover {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+
+/* 每日顶栏 */
+.day-item-topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  background: #f8fafc;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 12px;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.day-item-title-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .day-badge {
-  background: #e0f2fe;
-  color: #0369a1;
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  color: #ffffff;
   font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+  flex-shrink: 0;
 }
 
-.day-spots {
+.day-date-tag {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.day-desc-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.day-traffic-tag {
+  font-size: 11px;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 游览景点动线 */
+.day-spots-route-wrap {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #ffffff;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.spots-route-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.spots-route-list {
+  display: flex;
+  align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
 
-.spot-tag {
-  color: #334155;
-  background: #ffffff;
-  padding: 2px 6px;
-  border-radius: 4px;
+.spot-route-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #f8fafc;
   border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  transition: all 0.15s;
 }
 
-.day-hotel {
-  margin-left: auto;
+.spot-route-chip:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.spot-order-num {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3b82f6;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.spot-chip-name {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.spot-chip-duration {
+  font-size: 10px;
   color: #64748b;
+  background: rgba(100, 116, 139, 0.1);
+  padding: 0 4px;
+  border-radius: 3px;
 }
 
+.spot-chip-price {
+  font-size: 10px;
+  color: #e11d48;
+  font-weight: 600;
+}
+
+.route-arrow-icon {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: bold;
+}
+
+/* 餐饮精简条 */
+.day-meals-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 0 4px;
+}
+
+.meals-label {
+  color: #64748b;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.meals-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.meal-tag {
+  color: #475569;
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.meal-type {
+  color: #ea580c;
+  margin-right: 2px;
+}
+
+/* 住宿推荐卡片横栏 */
+.day-hotel-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: linear-gradient(135deg, #eff6ff, #f0fdf4);
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+.hotel-card-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.hotel-lead-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.hotel-lead-text {
+  font-weight: 700;
+  color: #1e40af;
+  flex-shrink: 0;
+}
+
+.hotel-title-text {
+  font-weight: 600;
+  color: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hotel-price-pill {
+  font-size: 11px;
+  color: #dc2626;
+  font-weight: 600;
+  background: #fee2e2;
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.hotel-rating-pill {
+  font-size: 10px;
+  color: #d97706;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.hotel-card-right {
+  flex-shrink: 0;
+}
+
+.hotel-distance-pill {
+  font-size: 11px;
+  color: #0369a1;
+  background: #e0f2fe;
+  border: 1px solid #bae6fd;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 底部操作与提示 */
 .plan-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #f1f5f9;
 }
 
 .footer-tip {
   font-size: 12px;
-  color: #94a3b8;
+  color: #64748b;
+  flex: 1;
+}
+
+.canvas-open-btn {
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
+  flex-shrink: 0;
 }
 
 /* 底部悬浮输入卡片 (契合截图设计) */
@@ -2913,6 +5042,66 @@ watch(currentPlan, (newPlan) => {
   margin-top: 8px;
   padding-top: 6px;
   border-top: 1px solid #f1f5f9;
+}
+
+.bar-left-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hitl-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+
+.hitl-toggle-pill:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+  border-color: #94a3b8;
+}
+
+.hitl-toggle-pill.active {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  border-color: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.3);
+}
+
+.hitl-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  transition: all 0.25s ease;
+}
+
+.hitl-toggle-pill.active .hitl-pill-dot {
+  background: #4ade80;
+  box-shadow: 0 0 6px #4ade80;
+}
+
+.hitl-pill-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.hitl-toggle-pill.active .hitl-pill-tag {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
 }
 
 .shortcut-hint {

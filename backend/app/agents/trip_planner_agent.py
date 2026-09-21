@@ -551,6 +551,8 @@ class MultiAgentTripPlanner:
             "thread_id": tid,
             "city": request.city,
             "travel_days": request.travel_days,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
             "candidate_attractions": candidate_attractions,
             "candidate_hotels": enriched_hotels,
             "weather_info": values.get("weather_data", []),
@@ -562,6 +564,8 @@ class MultiAgentTripPlanner:
         selected_attractions: list[str] | None = None,
         selected_hotel: str | None = None,
         user_feedback: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> TripPlan:
         """HITL 阶段二：接收用户确认与反馈，更新状态后恢复图执行直至生成有效计划。"""
         config = {"configurable": {"thread_id": thread_id}}
@@ -578,6 +582,26 @@ class MultiAgentTripPlanner:
             updates["selected_hotel"] = selected_hotel
         if user_feedback is not None:
             updates["user_feedback"] = user_feedback
+
+        # 若用户在人机协同卡片中校准或补充了真实日期，更新 request 状态与游玩天数
+        current_req = state.values.get("request")
+        if current_req and (start_date or end_date):
+            from datetime import date
+            new_start = start_date or current_req.start_date
+            new_end = end_date or current_req.end_date
+            calc_days = current_req.travel_days
+            try:
+                d1 = date.fromisoformat(new_start)
+                d2 = date.fromisoformat(new_end)
+                calc_days = max(1, (d2 - d1).days + 1)
+            except Exception:
+                pass
+            updated_req = current_req.model_copy(update={
+                "start_date": new_start,
+                "end_date": new_end,
+                "travel_days": calc_days,
+            })
+            updates["request"] = updated_req
 
         if updates:
             # 标记为前驱节点写入，保证后续正常执行待处理节点 planner
@@ -828,6 +852,23 @@ class MultiAgentTripPlanner:
                 f" 天气来源：{weather_source}；Open-Meteo 的温度为当日最高/最低气温，"
                 "请在临行前复查。"
             )
+
+        # 补齐并校验每日推荐酒店与最近景点的真实空间距离描述
+        all_attractions = state.get("candidate_attractions", [])
+        for day in plan.days:
+            if day.hotel and day.hotel.location:
+                # 优先匹配当天的景点，若无则使用全局候选景点
+                day_pois = [
+                    POIInfo(id=f"att_{idx}", name=a.name, type=a.category or "", address=a.address, location=a.location)
+                    for idx, a in enumerate(day.attractions)
+                    if a.location
+                ]
+                calc_pois = day_pois if day_pois else all_attractions
+                if not day.hotel.distance or day.hotel.distance in ("距离景点2公里", "位置距离"):
+                    dist_desc = format_nearest_attraction_distance(day.hotel.location, calc_pois)
+                    if dist_desc:
+                        day.hotel.distance = dist_desc
+
         if retry_count > 0:
             print(f"✅ 第 {retry_count + 1} 次尝试校验通过")
         return {"trip_plan": plan, "validation_error": ""}
@@ -962,28 +1003,44 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
     """使用 LLM 或启发式提取将自然语言意图转换为 TripRequest 对象"""
     from datetime import date, timedelta
 
-    tomorrow = date.today() + timedelta(days=1)
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    current_weekday_str = weekday_names[today.weekday()]
 
-    prompt = f"""你是一个智能旅行助理。请从用户输入的自然语言描述中提取旅行规划关键参数。
+    prompt = f"""你是一个专业的智能旅行规划助手。当前系统基准时间为：{today.isoformat()}（{current_weekday_str}）。
+请从用户输入的自然语言中提取旅行意图参数，并由你严格评估用户是否明确指定了出发时间与行程时长。
+
 用户输入: "{text}"
 
 请严格输出如下 JSON 格式，不得包含其它说明：
 ```json
 {{
   "city": "目的地城市名称，如：北京、上海、成都、西安等",
-  "travel_days": 3,
+  "travel_days": 4,
   "start_date": "YYYY-MM-DD",
   "end_date": "YYYY-MM-DD",
+  "has_explicit_start_date": false,
+  "has_explicit_duration": true,
+  "has_explicit_city": true,
+  "clarification_prompt": "已为您锁定 4 天行程，请问您打算哪天出发前往目的地？",
   "transportation": "公共交通 / 自驾 / 步行 / 混合",
   "accommodation": "经济型酒店 / 舒适型酒店 / 豪华酒店 / 民宿",
   "preferences": ["历史文化", "美食"],
   "free_text_input": "用户的具体诉求或预算备注"
 }}
 ```
-规则：
-1. 如果用户未指明日期，start_date 设置为 {(tomorrow).isoformat()}，end_date 依据天数推算；
-2. 如果用户未指明具体天数，默认提取为 3 天；
-3. 从文字中提取偏好（如提到故宫/博物馆提取“历史文化”，提到小吃/火锅提取“美食”，提到带娃/迪士尼提取“亲子/休闲”）。
+核心规则：
+1. 【出发时间判定 has_explicit_start_date】：用户是否在输入中指明了何时启程/出发？
+   - 指明了明确日期或相对时间（如"明天"、"后天"、"下周五"、"10月1日"、"国庆假期"、"这周末"等）=> 设为 true，并根据基准时间准确换算为 YYYY-MM-DD 格式。
+   - 完全没有指明何时出发（例如用户仅说"成都4天吃货休闲路线"、"想去北京玩"、"三日游"、"自驾游"）=> 必须设为 false！start_date 暂设为 {(tomorrow).isoformat()}。
+2. 【行程时长判定 has_explicit_duration】：用户是否指明了玩几天或大致时长？
+   - 明确指明（如"4天"、"玩3天"、"周末两天"、"五日游"）=> 设为 true，travel_days 提取为对应的天数整数。
+   - 未指明（如用户仅说"我想去成都吃火锅"、"想去西安"）=> 设为 false，travel_days 默认设为 3 天。
+3. 【反问引导语 clarification_prompt】：
+   - 若 has_explicit_start_date 为 false，生成一句最自然贴切的反问确认语（如"已为您锁定【{text}】中的 X 天行程，请问您打算哪天出发？"）。
+   - 若 has_explicit_start_date 为 true，设为 null。
+4. 【目的地判定 has_explicit_city】：用户明确提到了城市名称则为 true；若未提及（如"我想去海边度假"），则为 false 且 city 给出合理推测。
 """
 
     agent_llm = llm or get_llm()
@@ -992,7 +1049,7 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
         if getattr(agent_llm, "provider", "") == "qwen" and str(getattr(agent_llm, "model", "")).startswith("qwen3."):
             options["extra_body"] = {"enable_thinking": False}
 
-        resp = agent_llm.generate("你是旅行参数提取助手，只返回严格的 JSON。", prompt, **options)
+        resp = agent_llm.generate("你是旅行参数提取与意图判断助手，只返回严格的 JSON。", prompt, **options)
 
         cleaned = resp.strip()
         if "```json" in cleaned:
@@ -1022,6 +1079,12 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
         if not city:
             city = "北京"
 
+        # 核心意图维度提取
+        has_explicit_start_date = bool(data.get("has_explicit_start_date", False))
+        has_explicit_duration = bool(data.get("has_explicit_duration", False))
+        has_city = bool(data.get("has_explicit_city", True))
+        clarification_prompt = data.get("clarification_prompt")
+
         return TripRequest(
             city=city,
             start_date=start_d.isoformat(),
@@ -1031,6 +1094,11 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
             accommodation=data.get("accommodation") or "舒适型酒店",
             preferences=data.get("preferences") or ["历史文化", "美食"],
             free_text_input=data.get("free_text_input") or text,
+            has_explicit_dates=has_explicit_start_date,
+            has_explicit_start_date=has_explicit_start_date,
+            has_explicit_duration=has_explicit_duration,
+            has_explicit_city=has_city,
+            clarification_prompt=clarification_prompt,
         )
     except Exception as exc:
         print(f"⚠️ 自然语言参数提取异常，使用规则提取兜底: {exc}")
@@ -1039,20 +1107,27 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
             "北京", "上海", "广州", "深圳", "成都", "杭州", "西安", "南京",
             "重庆", "武汉", "苏州", "厦门", "青岛", "三亚", "昆明", "大理", "丽江", "哈尔滨"
         ]
+        has_city = False
         for c in popular_cities:
             if c in text:
                 city = c
+                has_city = True
                 break
 
         days = 3
+        has_explicit_duration = False
         m = re.search(r"(\d+)\s*(?:天|日)", text)
         if m:
             try:
                 days = int(m.group(1))
+                has_explicit_duration = True
             except Exception:
                 days = 3
-        days = max(1, min(30, days))
 
+        # 显式出发日期判定（仅当提及明确日期词时才为 True）
+        has_explicit_start_date = bool(re.search(r"(明天|后天|下周|周末|国庆|元旦|五一|\d+月\d+日?|\d+号)", text))
+
+        days = max(1, min(30, days))
         start_d = tomorrow
         end_d = start_d + timedelta(days=days - 1)
 
@@ -1066,6 +1141,10 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
         if not prefs:
             prefs = ["休闲", "美食"]
 
+        prompt_tip = None
+        if not has_explicit_start_date:
+            prompt_tip = f"已为您识别【{city}】{days}日游，请问您计划哪天出发？"
+
         return TripRequest(
             city=city,
             start_date=start_d.isoformat(),
@@ -1075,5 +1154,10 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
             accommodation="舒适型酒店",
             preferences=prefs,
             free_text_input=text,
+            has_explicit_dates=has_explicit_start_date,
+            has_explicit_start_date=has_explicit_start_date,
+            has_explicit_duration=has_explicit_duration,
+            has_explicit_city=has_city,
+            clarification_prompt=prompt_tip,
         )
 

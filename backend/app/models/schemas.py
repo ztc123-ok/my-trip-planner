@@ -18,6 +18,11 @@ class TripRequest(BaseModel):
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
     thread_id: Optional[str] = Field(default=None, description="可选会话ID，指定后将状态保存至该会话")
+    has_explicit_dates: bool = Field(default=False, description="用户是否在输入中显式指定了具体出行日期或天数（向下兼容）")
+    has_explicit_start_date: bool = Field(default=False, description="用户是否显式指定了出发时间（如明天/下周五/10月1日等）")
+    has_explicit_duration: bool = Field(default=False, description="用户是否显式指定了游玩时长或天数（如4天/3天2晚等）")
+    has_explicit_city: bool = Field(default=True, description="用户是否在输入中显式指定了目的地城市")
+    clarification_prompt: Optional[str] = Field(default=None, description="大模型生成的轻量澄清反问引导语")
 
     @model_validator(mode="after")
     def validate_dates(self):
@@ -232,6 +237,8 @@ class PlanCandidateData(BaseModel):
     thread_id: str = Field(..., description="规划会话ID，用于恢复图执行")
     city: str = Field(..., description="城市")
     travel_days: int = Field(..., description="天数")
+    start_date: Optional[str] = Field(default=None, description="出行开始日期 YYYY-MM-DD")
+    end_date: Optional[str] = Field(default=None, description="出行结束日期 YYYY-MM-DD")
     candidate_attractions: List[POIInfo] = Field(default=[], description="候选景点列表")
     candidate_hotels: List[POIInfo] = Field(default=[], description="候选酒店列表")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
@@ -250,6 +257,8 @@ class PlanConfirmRequest(BaseModel):
     selected_attractions: Optional[List[str]] = Field(default=None, description="用户选中的景点名称列表")
     selected_hotel: Optional[str] = Field(default=None, description="用户选中的酒店名称")
     user_feedback: Optional[str] = Field(default=None, description="用户额外调整要求或反馈")
+    start_date: Optional[str] = Field(default=None, description="用户校准后的出行开始日期 YYYY-MM-DD")
+    end_date: Optional[str] = Field(default=None, description="用户校准后的出行结束日期 YYYY-MM-DD")
 
 
 # ============ 状态持久化与历史回溯模型 ============

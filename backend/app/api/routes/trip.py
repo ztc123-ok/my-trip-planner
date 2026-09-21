@@ -176,7 +176,9 @@ async def confirm_trip_plan(request: PlanConfirmRequest):
             thread_id=request.thread_id,
             selected_attractions=request.selected_attractions,
             selected_hotel=request.selected_hotel,
-            user_feedback=request.user_feedback
+            user_feedback=request.user_feedback,
+            start_date=request.start_date,
+            end_date=request.end_date,
         )
 
         return TripPlanResponse(

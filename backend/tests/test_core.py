@@ -785,11 +785,20 @@ class ApiTests(unittest.TestCase):
                     "weather_info": [],
                 }
 
-            def resume_trip_plan(self, thread_id, selected_attractions=None, selected_hotel=None, user_feedback=None):
+            def resume_trip_plan(
+                self,
+                thread_id,
+                selected_attractions=None,
+                selected_hotel=None,
+                user_feedback=None,
+                start_date=None,
+                end_date=None,
+                **kwargs
+            ):
                 return TripPlan(
                     city="北京",
-                    start_date="2026-10-01",
-                    end_date="2026-10-02",
+                    start_date=start_date or "2026-10-01",
+                    end_date=end_date or "2026-10-02",
                     days=[],
                     overall_suggestions=f"已选景点: {selected_attractions}, 反馈: {user_feedback}",
                 )
@@ -810,10 +819,14 @@ class ApiTests(unittest.TestCase):
                 "selected_attractions": ["故宫"],
                 "selected_hotel": "北京饭店",
                 "user_feedback": "优先上午游览故宫",
+                "start_date": "2026-10-03",
+                "end_date": "2026-10-05",
             })
             self.assertEqual(res2.status_code, 200)
             self.assertTrue(res2.json()["success"])
             self.assertIn("故宫", res2.json()["data"]["overall_suggestions"])
+            self.assertEqual(res2.json()["data"]["start_date"], "2026-10-03")
+            self.assertEqual(res2.json()["data"]["end_date"], "2026-10-05")
 
 
     def test_hotel_meta_inference_and_candidate_enrichment(self):
@@ -1290,6 +1303,64 @@ class Phase2ChatModifyTests(unittest.TestCase):
             self.assertIn("event: plan_complete", text)
 
 
+    def test_parse_natural_language_intent_duration_vs_start_date(self):
+        """测试大模型意图提取解耦: 仅提时长未提日期 vs 提了明确出发日期"""
+        from app.agents.trip_planner_agent import parse_natural_language_trip
+
+        class FakeLLMWithDurationOnly:
+            def generate(self, system, user_prompt, **kwargs):
+                return '''```json
+                {
+                  "city": "成都",
+                  "travel_days": 4,
+                  "start_date": "2026-09-22",
+                  "end_date": "2026-09-25",
+                  "has_explicit_start_date": false,
+                  "has_explicit_duration": true,
+                  "has_explicit_city": true,
+                  "clarification_prompt": "已为您锁定 4 天行程，请问您打算哪天出发前往成都？",
+                  "transportation": "公共交通",
+                  "accommodation": "舒适型酒店",
+                  "preferences": ["美食", "休闲"]
+                }
+                ```'''
+
+        # 1. 模拟用户输入 "成都4天吃货休闲路线"
+        req1 = parse_natural_language_trip("成都4天吃货休闲路线，多安排地道美食", llm=FakeLLMWithDurationOnly())
+        self.assertEqual(req1.city, "成都")
+        self.assertEqual(req1.travel_days, 4)
+        self.assertFalse(req1.has_explicit_start_date, "未指明出发日期，必须为 False")
+        self.assertTrue(req1.has_explicit_duration, "已指明4天，必须为 True")
+        self.assertIn("美食", req1.preferences)
+        self.assertIsNotNone(req1.clarification_prompt)
+
+        # 2. 模拟用户输入 "下周五去北京玩3天"
+        class FakeLLMWithExplicitDate:
+            def generate(self, system, user_prompt, **kwargs):
+                return '''```json
+                {
+                  "city": "北京",
+                  "travel_days": 3,
+                  "start_date": "2026-09-25",
+                  "end_date": "2026-09-27",
+                  "has_explicit_start_date": true,
+                  "has_explicit_duration": true,
+                  "has_explicit_city": true,
+                  "clarification_prompt": null,
+                  "transportation": "公共交通",
+                  "accommodation": "经济型酒店",
+                  "preferences": ["历史文化"]
+                }
+                ```'''
+
+        req2 = parse_natural_language_trip("下周五去北京玩3天", llm=FakeLLMWithExplicitDate())
+        self.assertEqual(req2.city, "北京")
+        self.assertEqual(req2.travel_days, 3)
+        self.assertTrue(req2.has_explicit_start_date, "指明了下周五，必须为 True")
+        self.assertTrue(req2.has_explicit_duration, "指明了3天，必须为 True")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

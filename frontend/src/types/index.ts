@@ -86,6 +86,11 @@ export interface TripFormData {
   accommodation: string
   preferences: string[]
   free_text_input: string
+  has_explicit_dates?: boolean
+  has_explicit_start_date?: boolean
+  has_explicit_duration?: boolean
+  has_explicit_city?: boolean
+  clarification_prompt?: string
 }
 
 export interface TripPlanResponse {
@@ -111,6 +116,8 @@ export interface PlanCandidateData {
   thread_id: string
   city: string
   travel_days: number
+  start_date?: string
+  end_date?: string
   candidate_attractions: POIInfo[]
   candidate_hotels: POIInfo[]
   weather_info: WeatherInfo[]
@@ -127,6 +134,8 @@ export interface PlanConfirmRequest {
   selected_attractions?: string[]
   selected_hotel?: string
   user_feedback?: string
+  start_date?: string
+  end_date?: string
 }
 
 export interface TripStateData {
@@ -173,6 +182,22 @@ export interface ChatMessage {
   isThoughtExpanded?: boolean
   loading?: boolean
   changesSummary?: string
+  // 前置轻量行程参数确认状态 (Pre-Search Parameter Confirmation)
+  isParamConfirmPending?: boolean
+  pendingParams?: TripFormData
+  // HITL 人机协同卡片相关状态
+  hitlCandidateData?: PlanCandidateData
+  hitlStartDate?: string
+  hitlEndDate?: string
+  hitlTravelDays?: number
+  initialTravelDays?: number
+  initialStartDate?: string
+  hitlRefreshing?: boolean
+  hitlSelectedAttractions?: string[]
+  hitlSelectedHotel?: string
+  hitlUserFeedback?: string
+  hitlConfirmed?: boolean
+  hitlSubmitting?: boolean
 }
 
 export interface ChatModifyRequest {
