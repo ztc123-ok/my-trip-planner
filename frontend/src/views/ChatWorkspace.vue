@@ -915,6 +915,7 @@ import {
   generateTripPlanStream,
   chatModifyTripPlan,
   parseNaturalLanguageTrip,
+  routeChatIntent,
   prepareTripPlan,
   confirmTripPlan,
 } from '@/services/api'
@@ -1161,25 +1162,36 @@ const handleSend = async () => {
   messages.value.push(userMsg)
   scrollToBottom()
 
-  // 智能判断用户是否意图开启新规划：
-  // 1. 当前无行程
-  // 2. 包含“重新规划/生成/新计划/规划/去XX”
-  // 3. 用户在输入中指定了明确的目的地城市或游玩天数
-  const isNewPlanIntent = (
-    !currentPlan.value ||
-    text.includes('重新规划') ||
-    text.includes('重新生成') ||
-    text.includes('新计划') ||
-    text.includes('帮我规划') ||
-    text.includes('换个城市') ||
-    /去[\u4e00-\u9fa5]{2,6}/.test(text) ||
-    /\d+\s*(?:天|日)/.test(text)
-  )
+  // 彻底废除前端客户端正则，全权委托大模型语义意图路由 (/api/trip/chat/intent)：
+  let isNewPlan = false
+  let parsedFormData: TripFormData | null = null
 
-  if (isNewPlanIntent) {
+  try {
+    const routeRes = await routeChatIntent({
+      text,
+      has_current_plan: Boolean(currentPlan.value),
+      current_city: currentPlan.value?.city || '',
+      chat_history: messages.value.slice(-6).map(m => ({ role: m.role, content: m.content })),
+    })
+
+    if (routeRes.success && routeRes.data) {
+      isNewPlan = routeRes.data.intent === 'new_plan'
+      if (isNewPlan && routeRes.data.parsed_form_data) {
+        parsedFormData = routeRes.data.parsed_form_data
+      }
+    } else {
+      isNewPlan = !currentPlan.value
+    }
+  } catch (routeErr) {
+    console.warn('语义路由请求异常，采用上下文保底策略:', routeErr)
+    isNewPlan = !currentPlan.value
+  }
+
+  if (isNewPlan) {
     try {
-      // 1. 意图解析：将自然语言提问转换为 TripFormData
-      const parsedFormData = await parseNaturalLanguageTrip(text)
+      if (!parsedFormData) {
+        parsedFormData = await parseNaturalLanguageTrip(text)
+      }
 
       // 只要用户未明确指定具体的出发时间（哪怕提到了4天等时长），都挂载前置参数确认胶囊
       const isStartDateExplicit = Boolean(parsedFormData.has_explicit_start_date)
@@ -1211,7 +1223,7 @@ const handleSend = async () => {
         await handleChatStreamingGeneration(parsedFormData)
       }
     } catch (err: any) {
-      message.error('意图解析失败: ' + (err.message || err))
+      message.error('新建规划意图解析失败: ' + (err.message || err))
     }
   } else {
     await handleChatModification(text)

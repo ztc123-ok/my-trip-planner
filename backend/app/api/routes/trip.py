@@ -18,8 +18,14 @@ from ...models.schemas import (
     ChatModifyResponse,
     NaturalLanguageParseRequest,
     NaturalLanguageParseResponse,
+    ChatIntentRouteRequest,
+    ChatIntentRouteResponse,
 )
-from ...agents.trip_planner_agent import get_trip_planner_agent, parse_natural_language_trip
+from ...agents.trip_planner_agent import (
+    get_trip_planner_agent,
+    parse_natural_language_trip,
+    classify_chat_intent,
+)
 from ...agents.chat_modify_agent import get_chat_modify_agent
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
@@ -293,6 +299,32 @@ async def chat_parse_intent(request: NaturalLanguageParseRequest):
     except Exception as e:
         print(f"❌ 自然语言意图提取失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"意图提取失败: {str(e)}")
+
+
+@router.post(
+    "/chat/intent",
+    response_model=ChatIntentRouteResponse,
+    summary="大模型对话语义意图路由",
+    description="利用大模型统一对用户对话进行语义意图识别，自主分流为'新建规划(new_plan)'还是'已有行程微调/问答(modify_plan)'"
+)
+async def chat_intent_route(request: ChatIntentRouteRequest):
+    """利用大模型进行顶层语义路由与分流"""
+    try:
+        data = await run_in_threadpool(
+            classify_chat_intent,
+            text=request.text,
+            has_current_plan=request.has_current_plan,
+            current_city=request.current_city or "",
+            chat_history=[m.model_dump(mode="json") for m in request.chat_history],
+        )
+        return ChatIntentRouteResponse(
+            success=True,
+            message="意图识别成功",
+            data=data,
+        )
+    except Exception as e:
+        print(f"❌ 大模型意图识别异常: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"意图识别失败: {str(e)}")
 
 
 @router.get(

@@ -19,7 +19,8 @@ from .checkpointer import get_checkpointer
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
 from ..services.weather_service import get_trip_forecast
-from ..models.schemas import TripRequest, TripPlan, WeatherInfo, POIInfo, Location
+from ..services.mcp_tool_adapter import create_amap_langchain_tools
+from ..models.schemas import TripRequest, TripPlan, WeatherInfo, POIInfo, Location, ChatIntentRouteData
 from ..config import get_settings
 
 # ============ Agent提示词 ============
@@ -206,6 +207,7 @@ class MultiAgentTripPlanner:
             else AmapService(mcp_tool=create_amap_tool(settings.amap_api_key))
         )
         self.checkpointer = checkpointer if checkpointer is not None else get_checkpointer()
+        self.tools = create_amap_langchain_tools(self.amap_service)
 
         builder = StateGraph(TripGraphState)
         builder.add_node("attractions", self._search_attractions)
@@ -1160,4 +1162,90 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
             has_explicit_city=has_city,
             clarification_prompt=prompt_tip,
         )
+
+
+def classify_chat_intent(
+    text: str,
+    has_current_plan: bool = False,
+    current_city: str = "",
+    chat_history: list = None,
+    llm=None,
+) -> ChatIntentRouteData:
+    """利用大模型进行顶层对话意图分类（语义路由 Semantic Router）。
+
+    分类规则：
+    - 'new_plan': 用户希望开启全新的城市旅行，或明确要求推倒重做/重新规划新城市。
+    - 'modify_plan': 用户在已有行程基础上微调（增删改替换、周边搜索、第X天调整），或针对当前行程进行提问咨询。
+    """
+    if not has_current_plan:
+        parsed_trip = parse_natural_language_trip(text, llm=llm)
+        return ChatIntentRouteData(
+            intent="new_plan",
+            reason="当前无进行中的旅行计划，初始化为新建行程规划",
+            parsed_form_data=parsed_trip,
+        )
+
+    agent_llm = llm or get_llm()
+    prompt = f"""你是一个智能旅行助手的语义路由专家。请分析用户在当前多轮会话中的输入，判断其真实意图。
+
+【意图类型】
+1. "new_plan": 用户明确表示想放弃当前行程，开启一个全新的城市旅行，或明确要求重新生成全新城市的旅行计划（如："不玩成都了，帮我重新规划去西安"、"换成上海3天"、"重新规划去北京"）。
+2. "modify_plan": 用户希望在当前已有的旅行计划基础上进行局部微调、增删、替换、调整天数安排，或对当前行程进行咨询提问（如："把第2天的行程替换为更小众文化景致"、"第二天下午太累了换个安静公园"、"第二天打车去机场要多久"、"帮我推荐离住处近的火锅"、"预算控制在2000以内"）。
+
+【上下文状态】
+- 当前已有行程城市: {current_city or "已选目的地"}
+- 用户最新输入: "{text}"
+
+【判断铁律】
+1. 如果用户提到了"第X天"、"换成"、"替换"、"改为"、"调整"、"去掉"、"增加"、"附近的"或针对当前行程提问，绝对属于 modify_plan，严禁判定为 new_plan！
+2. 只有当用户明确出现"去<新城市>"或"重新规划去<新城市>"等明确更换整个目的地的表达时，才判定为 new_plan。
+
+请仅严格返回以下 JSON 格式：
+```json
+{{
+  "intent": "new_plan" 或 "modify_plan",
+  "reason": "简明判定理由"
+}}
+```"""
+
+    try:
+        options = {}
+        if getattr(agent_llm, "provider", "") == "qwen" and str(getattr(agent_llm, "model", "")).startswith("qwen3."):
+            options["extra_body"] = {"enable_thinking": False}
+
+        resp = agent_llm.generate("你是严格的意图分类专家，只输出标准 JSON。", prompt, **options)
+        cleaned = resp.strip()
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```")[1].split("```")[0].strip()
+        else:
+            s = cleaned.find("{")
+            e = cleaned.rfind("}") + 1
+            if s != -1 and e > s:
+                cleaned = cleaned[s:e]
+
+        parsed = json.loads(cleaned)
+        intent = parsed.get("intent", "modify_plan")
+        reason = parsed.get("reason", "模型语义路由判定")
+        if intent not in ("new_plan", "modify_plan"):
+            intent = "modify_plan"
+
+        parsed_form = None
+        if intent == "new_plan":
+            parsed_form = parse_natural_language_trip(text, llm=llm)
+
+        return ChatIntentRouteData(
+            intent=intent,
+            reason=reason,
+            parsed_form_data=parsed_form,
+        )
+    except Exception as exc:
+        print(f"⚠️ 大模型意图分类异常，启用语义保底: {exc}")
+        return ChatIntentRouteData(
+            intent="modify_plan",
+            reason=f"分类服务降级保底: {exc}",
+            parsed_form_data=None,
+        )
+
 

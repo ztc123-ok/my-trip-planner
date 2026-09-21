@@ -361,3 +361,26 @@ class PlanStreamEvent(BaseModel):
     thread_id: Optional[str] = Field(default=None, description="会话ID")
 
 
+class ChatIntentRouteRequest(BaseModel):
+    """大模型语义意图路由请求"""
+    text: str = Field(..., description="用户输入的自然语言")
+    has_current_plan: bool = Field(default=False, description="当前是否已有生成好的行程")
+    current_city: Optional[str] = Field(default=None, description="当前行程所在城市")
+    chat_history: List[ChatMessage] = Field(default=[], description="近期对话历史")
+
+
+class ChatIntentRouteData(BaseModel):
+    """意图路由判定数据"""
+    intent: str = Field(..., description="意图类型: 'new_plan' (新建全新行程) | 'modify_plan' (微调/修改/问答)")
+    reason: str = Field(default="", description="判定理由说明")
+    parsed_form_data: Optional[TripRequest] = Field(default=None, description="如果是 new_plan，直接返回提取出的 TripRequest 参数")
+
+
+class ChatIntentRouteResponse(BaseModel):
+    """意图路由响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="意图识别成功", description="消息")
+    data: Optional[ChatIntentRouteData] = Field(default=None, description="意图路由判定数据")
+
+
+

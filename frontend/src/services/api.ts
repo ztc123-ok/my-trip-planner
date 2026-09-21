@@ -193,6 +193,32 @@ export async function parseNaturalLanguageTrip(text: string): Promise<TripFormDa
   }
 }
 
+export interface ChatIntentRoutePayload {
+  text: string
+  has_current_plan: boolean
+  current_city?: string
+  chat_history?: Array<{ role: string; content: string }>
+}
+
+export interface ChatIntentRouteResult {
+  intent: 'new_plan' | 'modify_plan'
+  reason: string
+  parsed_form_data?: TripFormData
+}
+
+/**
+ * 利用大模型进行统一语义意图路由（区分开启新规划还是微调已有行程）
+ */
+export async function routeChatIntent(payload: ChatIntentRoutePayload): Promise<{ success: boolean; data: ChatIntentRouteResult }> {
+  try {
+    const response = await apiClient.post<{ success: boolean; data: ChatIntentRouteResult }>('/api/trip/chat/intent', payload)
+    return response.data
+  } catch (error: any) {
+    console.error('语义意图路由失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '语义意图路由失败')
+  }
+}
+
 /**
  * 健康检查
  */
