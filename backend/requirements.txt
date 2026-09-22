@@ -28,3 +28,8 @@ uv>=0.8.0
 
 # 天气接口
 requests>=2.31.0
+
+# 向量数据库与知识库切片
+qdrant-client>=1.9.0
+python-frontmatter>=1.1.0
+

@@ -89,6 +89,8 @@ class Attraction(BaseModel):
     poi_id: Optional[str] = Field(default="", description="POI ID")
     image_url: Optional[str] = Field(default=None, description="图片URL")
     ticket_price: int = Field(default=0, description="门票价格(元)")
+    booking_tips: Optional[str] = Field(default=None, description="官方预约与放票规则 (RAG 知识库增强)")
+    tips: Optional[str] = Field(default=None, description="游玩避坑与动线贴士 (RAG 知识库增强)")
 
 
 class Meal(BaseModel):
@@ -168,6 +170,7 @@ class TripPlan(BaseModel):
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+    knowledge_highlights: Optional[List[str]] = Field(default_factory=list, description="知识库权威亮点速记 (RAG 知识库增强)")
 
 
 class TripPlanResponse(BaseModel):
@@ -242,6 +245,7 @@ class PlanCandidateData(BaseModel):
     candidate_attractions: List[POIInfo] = Field(default=[], description="候选景点列表")
     candidate_hotels: List[POIInfo] = Field(default=[], description="候选酒店列表")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
+    knowledge_highlights: Optional[List[str]] = Field(default_factory=list, description="知识库权威提醒与避坑贴士")
 
 
 class PlanCandidateResponse(BaseModel):

@@ -439,6 +439,23 @@
                     </div>
                   </div>
 
+                  <!-- 知识库权威攻略提醒横条 (RAG 增强) -->
+                  <div
+                    class="hitl-knowledge-bar"
+                    v-if="msg.hitlCandidateData.knowledge_highlights && msg.hitlCandidateData.knowledge_highlights.length > 0"
+                  >
+                    <span class="knowledge-bar-title">🏛️ 官方知识库放票与避坑提醒：</span>
+                    <div class="knowledge-bar-tags">
+                      <div
+                        v-for="(tip, kIdx) in msg.hitlCandidateData.knowledge_highlights"
+                        :key="kIdx"
+                        class="knowledge-mini-tag"
+                      >
+                        {{ tip }}
+                      </div>
+                    </div>
+                  </div>
+
                   <!-- 候选景点多选区 -->
                   <div class="hitl-section">
                     <div class="hitl-section-header">
@@ -603,6 +620,23 @@
                     </div>
                   </div>
 
+                  <!-- 官方知识库权威亮点提醒 (RAG 增强) -->
+                  <div
+                    class="plan-knowledge-highlights-strip"
+                    v-if="msg.planData.knowledge_highlights && msg.planData.knowledge_highlights.length > 0"
+                  >
+                    <span class="kh-strip-title">🏛️ 权威攻略速记：</span>
+                    <div class="kh-strip-tags">
+                      <span
+                        v-for="(tip, kIdx) in msg.planData.knowledge_highlights"
+                        :key="kIdx"
+                        class="kh-tag-pill"
+                      >
+                        {{ tip }}
+                      </span>
+                    </div>
+                  </div>
+
                   <!-- 每日精细规划卡片流水线 -->
                   <div class="days-preview-grid">
                     <div
@@ -629,11 +663,12 @@
                         <div class="spots-route-label">游览动线:</div>
                         <div class="spots-route-list">
                           <template v-for="(a, aIdx) in d.attractions" :key="a.name">
-                            <div class="spot-route-chip">
+                            <div class="spot-route-chip" :title="a.booking_tips || a.tips || a.description">
                               <span class="spot-order-num">{{ aIdx + 1 }}</span>
                               <span class="spot-chip-name">{{ a.name }}</span>
                               <span class="spot-chip-duration" v-if="a.visit_duration">{{ a.visit_duration }}min</span>
                               <span class="spot-chip-price" v-if="a.ticket_price">¥{{ a.ticket_price }}</span>
+                              <span class="spot-chip-rag-dot" v-if="a.booking_tips || a.tips" title="含官方避坑与放票须知">📌</span>
                             </div>
                             <span class="route-arrow-icon" v-if="aIdx < d.attractions.length - 1">➔</span>
                           </template>
@@ -2218,6 +2253,12 @@ const createExportDOM = (plan: TripPlan): HTMLElement => {
         ${plan.budget ? `<span style="color:#e11d48; font-weight:bold;">💰 <strong>预估总预算:</strong> ¥${plan.budget.total}</span>` : ''}
       </div>
       ${plan.overall_suggestions ? `<div style="margin-top:10px; font-size:12px; color:#475569; background:#f8fafc; padding:8px 12px; border-radius:6px; line-height:1.5;">💡 <strong>总体建议:</strong> ${escapeHtml(plan.overall_suggestions)}</div>` : ''}
+      ${plan.knowledge_highlights && plan.knowledge_highlights.length > 0 ? `
+        <div style="margin-top:8px; font-size:11px; color:#166534; background:#f0fdf4; border:1px solid #bbf7d0; padding:8px 12px; border-radius:6px; line-height:1.5;">
+          🏛️ <strong>官方知识库攻略速记:</strong>
+          <div style="margin-top:4px;">${plan.knowledge_highlights.map(h => `<div style="margin-bottom:3px;">• ${escapeHtml(h)}</div>`).join('')}</div>
+        </div>
+      ` : ''}
     </div>
   `
 
@@ -5510,5 +5551,67 @@ watch(currentPlan, (newPlan) => {
 :deep(.custom-map-pin) {
   background: transparent !important;
   border: none !important;
+}
+
+/* RAG 知识库增强相关样式 */
+.hitl-knowledge-bar {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.knowledge-bar-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #166534;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.knowledge-bar-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.knowledge-mini-tag {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #15803d;
+}
+
+.plan-knowledge-highlights-strip {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.kh-strip-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #166534;
+  display: block;
+  margin-bottom: 6px;
+}
+
+.kh-strip-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kh-tag-pill {
+  font-size: 11px;
+  color: #15803d;
+  line-height: 1.4;
+}
+
+.spot-chip-rag-dot {
+  font-size: 10px;
+  cursor: help;
 }
 </style>

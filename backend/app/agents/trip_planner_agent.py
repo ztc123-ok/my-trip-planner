@@ -19,6 +19,7 @@ from .checkpointer import get_checkpointer
 from ..services.llm_service import get_llm
 from ..services.amap_service import AmapService, create_amap_tool
 from ..services.weather_service import get_trip_forecast
+from ..services.knowledge_service import get_knowledge_service
 from ..services.mcp_tool_adapter import create_amap_langchain_tools
 from ..models.schemas import TripRequest, TripPlan, WeatherInfo, POIInfo, Location, ChatIntentRouteData
 from ..config import get_settings
@@ -34,7 +35,7 @@ WEATHER_AGENT_PROMPT = """你是天气查询专家。只根据已取得的真实
 HOTEL_AGENT_PROMPT = """你是酒店推荐专家。根据高德地图 MCP 已返回的真实酒店资料，
 整理适合用户住宿偏好的酒店。保留名称、地址与坐标，不要编造未提供的酒店。"""
 
-PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息和天气信息,生成详细的旅行计划。
+PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点信息、天气信息与官方知识库深度攻略,生成详细且务实的旅行计划。
 
 请严格按照以下JSON格式返回旅行计划:
 ```json
@@ -67,7 +68,9 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
           "visit_duration": 120,
           "description": "景点详细描述",
           "category": "景点类别",
-          "ticket_price": 60
+          "ticket_price": 60,
+          "booking_tips": "官方预约与放票规则（从提供的知识库攻略中提取，如：提前7天20:00微信抢票，周一闭馆）",
+          "tips": "实用避坑与动线建议（从知识库提取，如：由午门进神武门出，避开黑车野导）"
         }
       ],
       "meals": [
@@ -89,6 +92,10 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
     }
   ],
   "overall_suggestions": "总体建议",
+  "knowledge_highlights": [
+    "【故宫预约】提前7天20:00在微信小程序预约，周一闭馆；必须带二代身份证刷闸机进门",
+    "【避坑指南】端门广场与地铁口黄牛所谓'不用排队低价票'均为诈骗，切勿轻信"
+  ],
   "budget": {
     "total_attractions": 180,
     "total_hotels": 1200,
@@ -111,6 +118,10 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
    - 餐饮预估费用(estimated_cost)
    - 酒店预估费用(estimated_cost)
    - 预算汇总(budget)包含各项总费用
+8. **知识库深度融合 (RAG 增强)**:
+   - 严格参考已提供的官方知识库攻略。若知识库指出某景点周一闭馆或特定时段不开放，绝对不可在对应日期安排游玩！
+   - 为每个景点提炼 booking_tips（预约规则与放票时间）和 tips（避坑防骗与游玩动线）；
+   - 在 knowledge_highlights 数组中列出 2-4 条全案最具实用价值的权威避坑与放票要点。
 """
 
 
@@ -174,6 +185,8 @@ class TripGraphState(TypedDict, total=False):
     weather_source: str
     weather_response: str
     hotel_response: str
+    knowledge_context: str                 # RAG 检索提炼的官方深度攻略、预约放票规则与避坑指南
+    knowledge_docs: list[dict]             # 知识库召回的原始文档片段
     planner_response: str
     trip_plan: TripPlan
     retry_count: int          # 当前重试次数（0=首次尝试）
@@ -195,9 +208,9 @@ def _should_retry(state: TripGraphState) -> Literal["planner", "__end__"]:
 
 
 class MultiAgentTripPlanner:
-    """Four specialist LangGraph nodes with validated TripPlan output and HITL support."""
+    """Five specialist LangGraph nodes with validated TripPlan output and HITL support."""
 
-    agent_names = ("景点搜索专家", "天气查询专家", "酒店推荐专家", "行程规划专家")
+    agent_names = ("景点搜索专家", "天气查询专家", "酒店推荐专家", "知识检索专家", "行程规划专家")
 
     def __init__(self, llm=None, amap_service: AmapService | None = None, checkpointer=None):
         settings = get_settings()
@@ -213,11 +226,13 @@ class MultiAgentTripPlanner:
         builder.add_node("attractions", self._search_attractions)
         builder.add_node("weather", self._get_weather)
         builder.add_node("hotels", self._search_hotels)
+        builder.add_node("retrieval", self._retrieve_knowledge)
         builder.add_node("planner", self._generate_plan)
         builder.add_node("validate", self._validate_plan)
         for node in ("attractions", "weather", "hotels"):
             builder.add_edge(START, node)
-        builder.add_edge(["attractions", "weather", "hotels"], "planner")
+        builder.add_edge(["attractions", "weather", "hotels"], "retrieval")
+        builder.add_edge("retrieval", "planner")
         builder.add_edge("planner", "validate")
         builder.add_conditional_edges("validate", _should_retry)
 
@@ -422,7 +437,26 @@ class MultiAgentTripPlanner:
                                 }
                             }
 
-                        # 若 3 个前置节点刚集齐，立刻触发 planner 启动事件
+                        elif node_name == "retrieval":
+                            k_docs = node_output.get("knowledge_docs", [])
+                            spot_names = list(dict.fromkeys([d.get("spot_name") for d in k_docs if d.get("spot_name")]))
+                            spot_desc = "、".join(spot_names[:3]) if spot_names else request.city
+                            yield {
+                                "event": "node_finish",
+                                "node": "retrieval",
+                                "name": "知识检索增强专家",
+                                "status": "completed",
+                                "stage": "城市深度攻略检索",
+                                "progress": 72,
+                                "elapsed_seconds": round(time.time() - start_time, 1),
+                                "message": f"已从本地向量知识库召回【{spot_desc}】等 {len(k_docs)} 条权威放票规则与避坑贴士",
+                                "data": {
+                                    "count": len(k_docs),
+                                    "spots": spot_names,
+                                }
+                            }
+
+                        # 若前置并行专家与检索专家就绪，触发 planner 启动事件
                         if len(parallel_nodes_done) >= 3 and not planner_started:
                             planner_started = True
                             poi_names = [p.name for p in collected_attractions[:3]]
@@ -433,9 +467,9 @@ class MultiAgentTripPlanner:
                                 "name": "行程规划专家",
                                 "status": "running",
                                 "stage": "情报汇集建模",
-                                "progress": 72,
+                                "progress": 75,
                                 "elapsed_seconds": round(time.time() - start_time, 1),
-                                "message": f"已锁定 {len(collected_attractions)} 个景点({poi_desc}等)、{len(collected_weather)} 天天气预报，进入多维时空规划模型...",
+                                "message": f"已锁定 {len(collected_attractions)} 个景点({poi_desc}等)、{len(collected_weather)} 天天气预报及权威攻略，进入多维时空规划模型...",
                                 "data": {
                                     "attractions_count": len(collected_attractions),
                                     "weather_count": len(collected_weather),
@@ -549,6 +583,12 @@ class MultiAgentTripPlanner:
             else:
                 enriched_hotels.append(h)
 
+        k_docs = values.get("knowledge_docs", [])
+        knowledge_highlights = [
+            f"【{d.get('spot_name')}·{d.get('section_type')}】{d.get('content', '')[:100].replace(chr(10), ' ')}..."
+            for d in k_docs[:4]
+        ]
+
         return {
             "thread_id": tid,
             "city": request.city,
@@ -558,6 +598,7 @@ class MultiAgentTripPlanner:
             "candidate_attractions": candidate_attractions,
             "candidate_hotels": enriched_hotels,
             "weather_info": values.get("weather_data", []),
+            "knowledge_highlights": knowledge_highlights,
         }
 
     def resume_trip_plan(
@@ -607,7 +648,7 @@ class MultiAgentTripPlanner:
 
         if updates:
             # 标记为前驱节点写入，保证后续正常执行待处理节点 planner
-            self.graph_hitl.update_state(config, updates, as_node="hotels")
+            self.graph_hitl.update_state(config, updates, as_node="retrieval")
 
         print(f"▶️ LangGraph HITL 恢复执行 planner 与 validate (thread_id={thread_id})")
         result = self.graph_hitl.invoke(None, config=config)
@@ -793,6 +834,61 @@ class MultiAgentTripPlanner:
             "hotel_response": f"高德地图真实酒店：{verified}\n专家整理：{summary}",
         }
 
+    def _retrieve_knowledge(self, state: TripGraphState) -> dict:
+        request = state["request"]
+        print(f"📚 知识检索专家: 正在为 {request.city} 检索向量知识库攻略...")
+        try:
+            ks = get_knowledge_service()
+            candidate_pois = state.get("candidate_attractions", [])
+
+            all_hits = []
+            seen_spot_sections = set()
+
+            # 1. 优先针对候选景点检索官方预约放票与避坑规则
+            for poi in candidate_pois[:6]:
+                spot_name = poi.name.split("-")[0].split("·")[0].split("(")[0].split("（")[0].strip()
+                hits = ks.search_knowledge(city=request.city, query=spot_name, top_k=2)
+                for h in hits:
+                    key = (h.get("spot_name"), h.get("section_type"))
+                    if key not in seen_spot_sections and h.get("content"):
+                        seen_spot_sections.add(key)
+                        all_hits.append(h)
+
+            # 2. 结合偏好或自由诉求检索城市综合攻略贴士
+            pref_terms = [request.city] + (request.preferences or [])
+            if request.free_text_input:
+                pref_terms.append(request.free_text_input)
+            general_query = " ".join(pref_terms)
+            general_hits = ks.search_knowledge(city=request.city, query=general_query, top_k=2)
+            for h in general_hits:
+                key = (h.get("spot_name"), h.get("section_type"))
+                if key not in seen_spot_sections and h.get("content"):
+                    seen_spot_sections.add(key)
+                    all_hits.append(h)
+
+            if all_hits:
+                context_blocks = []
+                for h in all_hits[:8]:
+                    context_blocks.append(
+                        f"【{h.get('spot_name')} - {h.get('section_type')}】\n{h.get('content')}"
+                    )
+                knowledge_context = "\n\n".join(context_blocks)
+                print(f"✅ 知识检索完成，共命中 {len(all_hits)} 个权威切片")
+            else:
+                knowledge_context = "暂无特定景点的官方专有切片，请按常规时空逻辑规划并注明以景区实时公告为准。"
+                print("ℹ️ 知识库暂未命中特定切片")
+
+            return {
+                "knowledge_context": knowledge_context,
+                "knowledge_docs": all_hits[:8],
+            }
+        except Exception as exc:
+            print(f"⚠️ [知识检索] 发生异常: {exc}")
+            return {
+                "knowledge_context": "知识库暂不可用，请按常规常识规划。",
+                "knowledge_docs": [],
+            }
+
     def _generate_plan(self, state: TripGraphState) -> dict:
         request = state["request"]
         retry_count = state.get("retry_count", 0)
@@ -811,6 +907,7 @@ class MultiAgentTripPlanner:
             state["attraction_response"],
             verified_weather,
             state["hotel_response"],
+            knowledge_context=state.get("knowledge_context", ""),
             selected_attractions=state.get("selected_attractions"),
             selected_hotel=state.get("selected_hotel"),
             user_feedback=state.get("user_feedback"),
@@ -871,6 +968,27 @@ class MultiAgentTripPlanner:
                     if dist_desc:
                         day.hotel.distance = dist_desc
 
+        # RAG 知识库后置补齐与强化
+        k_docs = state.get("knowledge_docs", [])
+        if not plan.knowledge_highlights and k_docs:
+            plan.knowledge_highlights = [
+                f"【{d.get('spot_name')}·{d.get('section_type')}】{d.get('content', '')[:100].replace(chr(10), ' ')}..."
+                for d in k_docs[:3]
+            ]
+        if k_docs:
+            for day in plan.days:
+                for att in day.attractions:
+                    clean_att_name = att.name.split("-")[0].split("·")[0].split("(")[0].split("（")[0].strip()
+                    for d in k_docs:
+                        d_spot = (d.get("spot_name") or "").strip()
+                        if d_spot and (d_spot in clean_att_name or clean_att_name in d_spot):
+                            if not att.booking_tips and "预约" in d.get("section_type", ""):
+                                lines = [l.strip() for l in d.get("content", "").split("\n") if l.strip()]
+                                att.booking_tips = "；".join(lines[:2]).replace("**", "").replace("- ", "")
+                            if not att.tips and any(k in d.get("section_type", "") for k in ("贴士", "动线", "机位", "路线")):
+                                lines = [l.strip() for l in d.get("content", "").split("\n") if l.strip()]
+                                att.tips = "；".join(lines[:2]).replace("**", "").replace("- ", "")
+
         if retry_count > 0:
             print(f"✅ 第 {retry_count + 1} 次尝试校验通过")
         return {"trip_plan": plan, "validation_error": ""}
@@ -881,6 +999,7 @@ class MultiAgentTripPlanner:
         attractions: str,
         weather: str,
         hotels: str = "",
+        knowledge_context: str = "",
         selected_attractions: list[str] | None = None,
         selected_hotel: str | None = None,
         user_feedback: str | None = None,
@@ -905,6 +1024,8 @@ class MultiAgentTripPlanner:
 **酒店信息:**
 {hotels}
 """
+        if knowledge_context:
+            query += f"\n**官方知识库权威攻略与避坑指南 (RAG 增强):**\n{knowledge_context}\n"
         if selected_attractions:
             query += f"\n**用户已明确确认的心仪景点 (请务必优先安排以下景点):** {', '.join(selected_attractions)}\n"
         if selected_hotel:

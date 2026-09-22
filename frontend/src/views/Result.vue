@@ -84,6 +84,14 @@
                   <span class="info-label">💡 建议:</span>
                   <span class="info-value">{{ tripPlan.overall_suggestions }}</span>
                 </div>
+                <div v-if="tripPlan.knowledge_highlights && tripPlan.knowledge_highlights.length" class="info-item knowledge-box">
+                  <span class="info-label">🏛️ 权威攻略速记:</span>
+                  <div class="knowledge-tags">
+                    <div v-for="(tip, kIdx) in tripPlan.knowledge_highlights" :key="kIdx" class="knowledge-tag-item">
+                      {{ tip }}
+                    </div>
+                  </div>
+                </div>
               </div>
             </a-card>
 
@@ -226,6 +234,16 @@
                         <p><strong>游览时长:</strong> {{ item.visit_duration }}分钟</p>
                         <p><strong>描述:</strong> {{ item.description }}</p>
                         <p v-if="item.rating"><strong>评分:</strong> {{ item.rating }}⭐</p>
+
+                        <!-- RAG 知识库增强: 预约须知与避坑贴士 -->
+                        <div v-if="item.booking_tips" class="rag-tip-box booking-box">
+                          <span class="rag-badge booking">📌 预约须知</span>
+                          <span class="rag-text">{{ item.booking_tips }}</span>
+                        </div>
+                        <div v-if="item.tips" class="rag-tip-box advice-box">
+                          <span class="rag-badge advice">💡 避坑贴士</span>
+                          <span class="rag-text">{{ item.tips }}</span>
+                        </div>
                       </div>
                     </a-card>
                   </a-list-item>
@@ -1877,6 +1895,77 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 .d-hint {
   font-size: 11px;
   color: #94a3b8;
+}
+
+/* RAG 知识库增强卡片样式 */
+.knowledge-box {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.knowledge-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.knowledge-tag-item {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rag-tip-box {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rag-tip-box.booking-box {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+}
+
+.rag-tip-box.advice-box {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+
+.rag-badge {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 11px;
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.rag-badge.booking {
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.rag-badge.advice {
+  background: #f59e0b;
+  color: #ffffff;
+}
+
+.rag-text {
+  font-size: 12px;
+  color: inherit;
 }
 </style>
 

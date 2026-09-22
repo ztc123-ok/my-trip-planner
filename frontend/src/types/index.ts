@@ -15,6 +15,8 @@ export interface Attraction {
   rating?: number
   image_url?: string
   ticket_price?: number
+  booking_tips?: string
+  tips?: string
 }
 
 export interface Meal {
@@ -75,6 +77,7 @@ export interface TripPlan {
   weather_info: WeatherInfo[]
   overall_suggestions: string
   budget?: Budget
+  knowledge_highlights?: string[]
 }
 
 export interface TripFormData {
@@ -121,6 +124,7 @@ export interface PlanCandidateData {
   candidate_attractions: POIInfo[]
   candidate_hotels: POIInfo[]
   weather_info: WeatherInfo[]
+  knowledge_highlights?: string[]
 }
 
 export interface PlanCandidateResponse {

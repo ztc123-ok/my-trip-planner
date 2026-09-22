@@ -5,7 +5,7 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
-from .routes import trip, poi, map as map_routes
+from .routes import trip, poi, map as map_routes, knowledge
 
 # Windows 的默认 GBK 输出流不能编码 Agent 日志中的 emoji。
 for stream in (sys.stdout, sys.stderr):
@@ -37,6 +37,7 @@ app.add_middleware(
 app.include_router(trip.router, prefix="/api")
 app.include_router(poi.router, prefix="/api")
 app.include_router(map_routes.router, prefix="/api")
+app.include_router(knowledge.router, prefix="/api")
 
 
 @app.on_event("startup")

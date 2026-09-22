@@ -34,6 +34,7 @@ from ..services.mcp_tool_adapter import (
     convert_mcp_to_langchain_tools,
     create_amap_langchain_tools,
 )
+from ..services.knowledge_tool import create_knowledge_langchain_tool
 from .checkpointer import get_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 CHAT_MODIFY_SYSTEM_PROMPT = """你是智能旅行助手的行程修改专家。你的职责是根据用户的自然语言指令，精准调整已有的旅行计划。
 
-你可以自主调用高德地图工具获取真实数据：
+你可以自主调用高德地图工具与本地旅行知识库获取真实数据：
+- search_travel_knowledge: 检索城市的官方深度攻略、门票预约与放票规则、闭馆时间、最佳机位与避坑防骗贴士（当用户询问门票怎么买、提前几天抢、周几闭馆、防骗避坑或路线建议时优先调用）。
 - amap_search_poi: 搜索城市内的真实景点、餐厅、美食、酒店等，获取真实经纬度坐标、地址和门票。
 - amap_get_weather: 查询城市的实时天气及未来预报。
 - amap_plan_route: 规划两点间路线（步行/驾车/公交）与耗时。
@@ -159,6 +161,11 @@ class ChatModifyAgent:
 
         # 1. 注册高德地图标准 LangChain 工具套件
         self.tools = create_amap_langchain_tools(self.amap_service)
+        # 1.1 注册旅行知识库检索工具 (Phase 4: RAG 知识增强)
+        try:
+            self.tools.append(create_knowledge_langchain_tool())
+        except Exception as exc:
+            logger.warning("注册知识库检索工具失败: %s", exc)
 
         # 2. 动态发现并注册底层 MCP Client 暴露的其他工具
         mcp_client = getattr(self.amap_service, "mcp_tool", None)

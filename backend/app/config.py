@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     checkpointer_type: str = "sqlite"  # 支持 "sqlite" 或 "memory"
     sqlite_db_path: str = "data/trip_checkpoints.db"
 
+    # Qdrant 向量库配置
+    qdrant_host: str = "localhost"
+    qdrant_port: int = 6333
+    qdrant_collection_name: str = "travel_knowledge"
+
+    # Embedding 模型配置
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-v3"
+
+
     class Config:
         env_file = ".env"
         case_sensitive = False
