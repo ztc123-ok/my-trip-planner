@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type {
   TripFormData,
+  TripPlan,
   TripPlanResponse,
   PlanCandidateResponse,
   PlanConfirmRequest,
@@ -8,6 +9,9 @@ import type {
   StreamEvent,
   ChatModifyRequest,
   ChatModifyResponse,
+  EvaluationReport,
+  PlanEvaluationResponse,
+  ObservabilityStatus,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -237,5 +241,38 @@ export async function getAttractionPhoto(name: string, city: string): Promise<st
   return response.data?.data?.photo_url || null
 }
 
+/**
+ * 对旅行规划执行多维度结构化质量评估 (Phase 6)
+ */
+export async function evaluateTripPlan(tripPlan: TripPlan, threadId?: string): Promise<EvaluationReport> {
+  try {
+    const response = await apiClient.post<PlanEvaluationResponse>('/api/trip/evaluate', {
+      trip_plan: tripPlan,
+      thread_id: threadId,
+    })
+    if (response.data && response.data.data) {
+      return response.data.data
+    }
+    throw new Error('未返回有效评估数据')
+  } catch (error: any) {
+    console.error('行程质量评估失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '行程评估失败')
+  }
+}
+
+/**
+ * 获取 LangSmith Tracing 可观测性状态 (Phase 6)
+ */
+export async function getObservabilityStatus(): Promise<ObservabilityStatus> {
+  try {
+    const response = await apiClient.get<{ success: boolean; data: ObservabilityStatus }>('/api/trip/observability/status')
+    return response.data.data
+  } catch (error: any) {
+    console.error('获取可观测性状态失败:', error)
+    throw new Error(error.message || '获取可观测性状态失败')
+  }
+}
+
 export default apiClient
+
 

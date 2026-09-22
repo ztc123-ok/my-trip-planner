@@ -100,6 +100,8 @@ export interface TripPlanResponse {
   success: boolean
   message: string
   data?: TripPlan
+  thread_id?: string
+  evaluation?: EvaluationReport
 }
 
 export interface POIInfo {
@@ -186,6 +188,7 @@ export interface ChatMessage {
   isThoughtExpanded?: boolean
   loading?: boolean
   changesSummary?: string
+  evaluation?: EvaluationReport
   // 前置轻量行程参数确认状态 (Pre-Search Parameter Confirmation)
   isParamConfirmPending?: boolean
   pendingParams?: TripFormData
@@ -217,6 +220,7 @@ export interface ChatModifyData {
   modified: boolean
   thread_id: string
   changes_summary?: string
+  evaluation?: EvaluationReport
 }
 
 export interface ChatModifyResponse {
@@ -236,6 +240,7 @@ export interface StreamEvent {
   elapsed_seconds?: number
   data?: any
   thread_id?: string
+  evaluation?: EvaluationReport
 }
 
 export interface AgentNodeStatus {
@@ -255,6 +260,67 @@ export interface ChatSession {
   tripPlan?: TripPlan
   messages: ChatMessage[]
 }
+
+// ============ Phase 6: 评估与可观测性类型 ============
+
+export interface EvaluationIssue {
+  dimension: 'completeness' | 'geography' | 'budget' | 'overall' | string
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  day_index?: number
+  suggestion?: string
+}
+
+export interface DimensionScore {
+  dimension: string
+  dimension_name: string
+  score: number
+  weight: number
+  passed: boolean
+  details: Record<string, any>
+}
+
+export interface EvaluationReport {
+  overall_score: number
+  grade: string
+  passed: boolean
+  dimensions: {
+    completeness: DimensionScore
+    geography: DimensionScore
+    budget: DimensionScore
+    [key: string]: DimensionScore
+  }
+  metrics: {
+    total_days?: number
+    expected_days?: number
+    total_attractions?: number
+    avg_attractions_per_day?: number
+    total_route_distance_km?: number
+    max_single_leg_km?: number
+    budget_total?: number
+    budget_arithmetic_valid?: boolean
+    critical_errors_count?: number
+    [key: string]: any
+  }
+  issues: EvaluationIssue[]
+  suggestions: string[]
+  created_at?: string
+}
+
+export interface PlanEvaluationResponse {
+  success: boolean
+  message: string
+  data?: EvaluationReport
+}
+
+export interface ObservabilityStatus {
+  tracing_enabled: boolean
+  has_api_key: boolean
+  project: string
+  endpoint: string
+  client_ready: boolean
+}
+
 
 
 

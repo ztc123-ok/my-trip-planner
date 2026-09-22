@@ -52,6 +52,9 @@
             <a-menu-item key="budget" v-if="tripPlan.budget">
               <span>💰 预算明细</span>
             </a-menu-item>
+            <a-menu-item key="evaluation">
+              <span>🎯 质量质检</span>
+            </a-menu-item>
             <a-menu-item key="map">
               <span>📍 景点地图</span>
             </a-menu-item>
@@ -75,6 +78,13 @@
           <div class="left-info">
             <!-- 行程概览 -->
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false" class="overview-card">
+              <template #extra>
+                <div v-if="evalReport" class="overview-score-chip" :class="scoreColorClass">
+                  <span class="osc-icon">🎯</span>
+                  <span class="osc-score">{{ evalReport.overall_score }}分</span>
+                  <span class="osc-grade">{{ evalReport.grade.split(' ')[0] }}</span>
+                </div>
+              </template>
               <div class="overview-content">
                 <div class="info-item">
                   <span class="info-label">📅 日期:</span>
@@ -132,6 +142,78 @@
             </a-card>
           </div>
         </div>
+
+        <!-- 行程质量与多维评估报告 (Phase 6) -->
+        <a-card id="evaluation" title="🎯 智能体全方位质量质检报告" :bordered="false" class="eval-card">
+          <template #extra>
+            <a-space>
+              <a-tag :color="observabilityStatus?.tracing_enabled ? 'cyan' : 'default'">
+                {{ observabilityStatus?.tracing_enabled ? '🔍 LangSmith Tracing 已激活' : '🔍 多维工程质检' }}
+              </a-tag>
+              <a-button size="small" :loading="evalLoading" @click="fetchEvaluation(true)">
+                🔄 重新质检
+              </a-button>
+            </a-space>
+          </template>
+
+          <div v-if="evalReport" class="eval-body">
+            <div class="eval-score-banner">
+              <div class="score-circle-box">
+                <div class="score-num" :class="scoreColorClass">{{ evalReport.overall_score }}</div>
+                <div class="score-label">综合质量分</div>
+              </div>
+              <div class="score-meta-box">
+                <div class="grade-title">
+                  <span class="grade-tag" :class="scoreColorClass">{{ evalReport.grade }}</span>
+                  <span class="grade-sub">经完整性、空间动线合理性、预算严密性三大维度量化核验</span>
+                </div>
+                <div class="metrics-row">
+                  <div class="m-pill">
+                    <span class="m-k">动线总里程:</span>
+                    <span class="m-v">{{ evalReport.metrics?.total_route_distance_km || 0 }} km</span>
+                  </div>
+                  <div class="m-pill">
+                    <span class="m-k">最大单段跨度:</span>
+                    <span class="m-v">{{ evalReport.metrics?.max_single_leg_km || 0 }} km</span>
+                  </div>
+                  <div class="m-pill">
+                    <span class="m-k">预算算术校验:</span>
+                    <span class="m-v">{{ evalReport.metrics?.budget_arithmetic_valid ? '✅ 严格一致' : '⚠️ 存在差额' }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 三大维度进度条 -->
+            <div class="eval-dimensions-grid">
+              <div class="dim-card" v-for="(dim, key) in evalReport.dimensions" :key="key">
+                <div class="dim-head">
+                  <span class="dim-name">{{ dim.dimension_name }}</span>
+                  <span class="dim-score">{{ dim.score }} 分</span>
+                </div>
+                <a-progress
+                  :percent="dim.score"
+                  :status="dim.score >= 85 ? 'success' : dim.score >= 60 ? 'normal' : 'exception'"
+                  :stroke-color="dim.score >= 85 ? '#52c41a' : dim.score >= 60 ? '#1890ff' : '#ff4d4f'"
+                />
+                <div class="dim-weight">权重: {{ (dim.weight * 100).toFixed(0) }}% · {{ dim.passed ? '达标' : '待优化' }}</div>
+              </div>
+            </div>
+
+            <!-- 优化建议与提示 -->
+            <div v-if="evalReport.suggestions && evalReport.suggestions.length" class="eval-suggestions-box">
+              <div class="sugg-title">💡 智能质检诊断与建议：</div>
+              <ul class="sugg-list">
+                <li v-for="(sugg, sIdx) in evalReport.suggestions" :key="sIdx">
+                  {{ sugg }}
+                </li>
+              </ul>
+            </div>
+          </div>
+          <div v-else-if="evalLoading" class="eval-loading-box">
+            <a-spin tip="正在对规划结果执行完整性、地理空间动线与预算严密性多维质检..." />
+          </div>
+        </a-card>
 
         <!-- 每日行程:可折叠 -->
         <a-card title="📅 每日行程" :bordered="false" class="days-card">
@@ -375,6 +457,9 @@
           <div class="d-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
           <div class="d-bubble">
             <div class="d-bubble-content">{{ msg.content }}</div>
+            <div class="d-bubble-eval" v-if="msg.evaluation">
+              <span class="d-eval-tag">🎯 行程质检分: <strong>{{ msg.evaluation.overall_score }}分</strong> ({{ msg.evaluation.grade.split(' ')[0] }})</span>
+            </div>
             <div class="d-bubble-time">{{ msg.time }}</div>
           </div>
         </div>
@@ -424,8 +509,8 @@ import 'leaflet/dist/leaflet.css'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import dayjs from 'dayjs'
-import type { Attraction, TripPlan } from '@/types'
-import { getAttractionPhoto, chatModifyTripPlan } from '@/services/api'
+import type { Attraction, TripPlan, EvaluationReport, ObservabilityStatus } from '@/types'
+import { getAttractionPhoto, chatModifyTripPlan, evaluateTripPlan, getObservabilityStatus } from '@/services/api'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -440,7 +525,7 @@ const chatDrawerVisible = ref(false)
 const chatInput = ref('')
 const chatLoading = ref(false)
 const drawerMsgContainer = ref<HTMLElement | null>(null)
-const chatMessages = ref<Array<{ role: 'user' | 'assistant'; content: string; time: string }>>([
+const chatMessages = ref<Array<{ role: 'user' | 'assistant'; content: string; time: string; evaluation?: EvaluationReport }>>([
   {
     role: 'assistant',
     content: '您好！我是您的 AI 行程小助手。您可以随时告诉我如何调整当前行程，比如：“把第2天的故宫换成颐和园”、“预算控制在3000以内”、“推荐一家特色素食餐厅”。',
@@ -453,6 +538,40 @@ const drawerQuickChips = [
   '预算降低 500 元',
   '行程太赶了，每天减少一个景点'
 ]
+
+// 行程质量与多维评估状态 (Phase 6)
+const evalReport = ref<EvaluationReport | null>(null)
+const evalLoading = ref(false)
+const observabilityStatus = ref<ObservabilityStatus | null>(null)
+
+const scoreColorClass = computed(() => {
+  const s = evalReport.value?.overall_score || 0
+  if (s >= 90) return 'score-excellent'
+  if (s >= 75) return 'score-good'
+  if (s >= 60) return 'score-pass'
+  return 'score-poor'
+})
+
+const fetchEvaluation = async (_force = false) => {
+  if (!tripPlan.value) return
+  evalLoading.value = true
+  try {
+    const threadId = sessionStorage.getItem('tripPlanThreadId') || undefined
+    evalReport.value = await evaluateTripPlan(tripPlan.value, threadId)
+  } catch (err: any) {
+    console.error('获取行程评估失败:', err)
+  } finally {
+    evalLoading.value = false
+  }
+}
+
+const fetchObservabilityStatus = async () => {
+  try {
+    observabilityStatus.value = await getObservabilityStatus()
+  } catch (err) {
+    console.error('获取可观测性状态失败:', err)
+  }
+}
 
 const sendDrawerChat = async () => {
   const text = chatInput.value.trim()
@@ -478,16 +597,23 @@ const sendDrawerChat = async () => {
     })
 
     if (res.success && res.data) {
+      if (res.data.evaluation) {
+        evalReport.value = res.data.evaluation
+      }
       chatMessages.value.push({
         role: 'assistant',
         content: res.data.reply + (res.data.changes_summary ? `\n（✨ ${res.data.changes_summary}）` : ''),
-        time: dayjs().format('HH:mm')
+        time: dayjs().format('HH:mm'),
+        evaluation: res.data.evaluation,
       })
 
       if (res.data.updated_plan && res.data.modified) {
         tripPlan.value = res.data.updated_plan
         sessionStorage.setItem('tripPlan', JSON.stringify(res.data.updated_plan))
         message.success('行程与地图已联动更新！')
+        if (!res.data.evaluation) {
+          void fetchEvaluation()
+        }
         nextTick(() => {
           void initMap()
         })
@@ -538,6 +664,8 @@ onMounted(async () => {
     await nextTick()
     void initMap()
     void loadAttractionPhotos()
+    void fetchEvaluation()
+    void fetchObservabilityStatus()
   }
 })
 
@@ -585,6 +713,7 @@ const saveChanges = () => {
     sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
   }
   message.success('修改已保存')
+  void fetchEvaluation()
 
   // 重新初始化地图以反映更改
   nextTick(() => {
@@ -1967,5 +2096,265 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   font-size: 12px;
   color: inherit;
 }
+
+/* Phase 6 质量质检评估卡片样式 */
+.eval-card {
+  margin-bottom: 24px;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+}
+
+.eval-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.eval-score-banner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%);
+  padding: 16px 20px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.score-circle-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12);
+  flex-shrink: 0;
+}
+
+.score-num {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.score-num.score-excellent {
+  color: #16a34a;
+}
+.score-num.score-good {
+  color: #2563eb;
+}
+.score-num.score-pass {
+  color: #d97706;
+}
+.score-num.score-poor {
+  color: #dc2626;
+}
+
+.score-label {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.score-meta-box {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.grade-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.grade-tag {
+  font-size: 14px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+
+.grade-tag.score-excellent {
+  background: #dcfce7;
+  color: #15803d;
+}
+.grade-tag.score-good {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.grade-tag.score-pass {
+  background: #fef3c7;
+  color: #b45309;
+}
+.grade-tag.score-poor {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.grade-sub {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.metrics-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.m-pill {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  display: flex;
+  gap: 4px;
+}
+
+.m-k {
+  color: #64748b;
+}
+
+.m-v {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.eval-dimensions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.dim-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.dim-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.dim-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: #334155;
+}
+
+.dim-score {
+  font-weight: 700;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.dim-weight {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+.eval-suggestions-box {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.sugg-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #92400e;
+  margin-bottom: 6px;
+}
+
+.sugg-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #78350f;
+  line-height: 1.6;
+}
+
+.eval-loading-box {
+  padding: 24px;
+  text-align: center;
+}
+
+/* 概览卡片顶栏评分徽章 */
+.overview-score-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+.overview-score-chip.score-excellent {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #059669;
+}
+
+.overview-score-chip.score-good {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #2563eb;
+}
+
+.overview-score-chip.score-pass {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #d97706;
+}
+
+.overview-score-chip.score-poor {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #dc2626;
+}
+
+.overview-score-chip .osc-score {
+  font-weight: 800;
+}
+
+.overview-score-chip .osc-grade {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+/* 抽屉气泡内的质检评分标签 */
+.d-bubble-eval {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed rgba(148, 163, 184, 0.3);
+}
+
+.d-eval-tag {
+  font-size: 11px;
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
+  display: inline-block;
+  font-weight: 600;
+}
 </style>
+
 

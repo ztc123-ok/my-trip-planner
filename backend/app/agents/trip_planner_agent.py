@@ -23,6 +23,8 @@ from ..services.knowledge_service import get_knowledge_service
 from ..services.mcp_tool_adapter import create_amap_langchain_tools
 from ..models.schemas import TripRequest, TripPlan, WeatherInfo, POIInfo, Location, ChatIntentRouteData
 from ..config import get_settings
+from ..services.observability_service import safe_traceable, record_evaluation_feedback
+from ..services.eval_service import evaluate_plan
 
 # ============ Agent提示词 ============
 
@@ -245,6 +247,7 @@ class MultiAgentTripPlanner:
             interrupt_before=["planner"]
         )
 
+    @safe_traceable(name="MultiAgentTripPlanner.plan_trip", run_type="chain")
     def plan_trip(self, request: TripRequest, thread_id: str | None = None) -> TripPlan:
         """一键全自动生成旅行计划（无中断模式，保存执行状态至检查点）。"""
         tid = thread_id or getattr(request, "thread_id", None) or f"trip_{uuid.uuid4().hex[:12]}"
@@ -534,6 +537,17 @@ class MultiAgentTripPlanner:
 
             if final_plan:
                 plan_dict = final_plan.model_dump(mode="json") if hasattr(final_plan, "model_dump") else final_plan
+                
+                # 自动化结构化评估与 LangSmith 反馈上报 (Phase 6)
+                eval_dict = None
+                try:
+                    if isinstance(final_plan, TripPlan):
+                        eval_rep = evaluate_plan(final_plan)
+                        eval_dict = eval_rep.model_dump(mode="json")
+                        record_evaluation_feedback(eval_rep, thread_id=tid)
+                except Exception as eval_err:
+                    print(f"⚠️ 流式完成评估上报异常 (优雅降级): {eval_err}")
+
                 yield {
                     "event": "plan_complete",
                     "thread_id": tid,
@@ -541,7 +555,8 @@ class MultiAgentTripPlanner:
                     "stage": "规划成功",
                     "elapsed_seconds": round(time.time() - start_time, 1),
                     "message": "旅行计划生成成功！",
-                    "data": plan_dict
+                    "data": plan_dict,
+                    "evaluation": eval_dict,
                 }
             else:
                 yield {
@@ -1285,6 +1300,7 @@ def parse_natural_language_trip(text: str, llm=None) -> TripRequest:
         )
 
 
+@safe_traceable(name="classify_chat_intent", run_type="chain")
 def classify_chat_intent(
     text: str,
     has_current_plan: bool = False,

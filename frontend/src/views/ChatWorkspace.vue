@@ -156,15 +156,41 @@
 
               <!-- AI 消息 -->
               <div v-else class="assistant-content">
-                <!-- 修改提示摘要 -->
+                <!-- 修改提示摘要与质检评分标签 -->
                 <div v-if="msg.changesSummary" class="changes-banner">
-                  <span class="banner-icon">✨</span>
-                  <span class="banner-text">{{ msg.changesSummary }}</span>
+                  <div class="banner-text-box">
+                    <span class="banner-icon">✨</span>
+                    <span class="banner-text">{{ msg.changesSummary }}</span>
+                  </div>
+                  <span
+                    v-if="msg.evaluation"
+                    class="banner-score-tag"
+                    :class="getScoreColorClass(msg.evaluation.overall_score)"
+                    :title="`质检评级: ${msg.evaluation.grade}`"
+                  >
+                    🎯 {{ msg.evaluation.overall_score }}分 · {{ msg.evaluation.grade.split(' ')[0] }}
+                  </span>
                 </div>
 
                 <!-- 回复正文 -->
                 <div class="assistant-bubble" v-if="msg.content">
                   {{ msg.content }}
+                </div>
+
+                <!-- 微调质量小胶囊 (当没有全量计划卡片但有评估报告时展示) -->
+                <div class="mod-quality-pill" v-if="msg.evaluation && !msg.planData" :class="getScoreColorClass(msg.evaluation.overall_score)">
+                  <div class="pill-head">
+                    <span class="pill-icon">🎯</span>
+                    <span class="pill-title">调整后行程质检评分：<strong>{{ msg.evaluation.overall_score }}分</strong></span>
+                    <span class="pill-grade-badge">{{ msg.evaluation.grade }}</span>
+                  </div>
+                  <div class="pill-dims">
+                    <span class="p-dim">完整性: {{ msg.evaluation.dimensions?.completeness?.score || 0 }}分</span>
+                    <span class="p-sep">·</span>
+                    <span class="p-dim">空间动线: {{ msg.evaluation.dimensions?.geography_route?.score || 0 }}分</span>
+                    <span class="p-sep">·</span>
+                    <span class="p-dim">预算严密: {{ msg.evaluation.dimensions?.budget_feasibility?.score || 0 }}分</span>
+                  </div>
                 </div>
 
                 <!-- 流式智能体进度卡片 (LangGraph 五大专家协作与深度推演流程输出) -->
@@ -612,8 +638,22 @@
                         </div>
                       </div>
                     </div>
-                    <div class="plan-card-header-right" v-if="msg.planData.budget">
-                      <div class="budget-badge-premium">
+                    <div class="plan-card-header-right">
+                      <!-- 🎯 行程质量评分徽章 -->
+                      <div
+                        class="plan-score-badge-header"
+                        v-if="msg.evaluation"
+                        :class="getScoreColorClass(msg.evaluation.overall_score)"
+                        :title="`多维质检评级: ${msg.evaluation.grade}`"
+                      >
+                        <span class="score-badge-icon">🎯</span>
+                        <div class="score-badge-info">
+                          <span class="score-badge-val">{{ msg.evaluation.overall_score }}分</span>
+                          <span class="score-badge-label">{{ msg.evaluation.grade.split(' ')[0] }}</span>
+                        </div>
+                      </div>
+
+                      <div class="budget-badge-premium" v-if="msg.planData.budget">
                         <span class="budget-label">预估总费用</span>
                         <span class="budget-amount">¥{{ msg.planData.budget.total }}</span>
                       </div>
@@ -634,6 +674,24 @@
                       >
                         {{ tip }}
                       </span>
+                    </div>
+                  </div>
+
+                  <!-- 🎯 多维质量质检微评栏 (Phase 6 质量评估体系) -->
+                  <div class="plan-quality-strip" v-if="msg.evaluation">
+                    <div class="quality-strip-left">
+                      <span class="qs-lead-tag" :class="getScoreColorClass(msg.evaluation.overall_score)">
+                        🎯 多维质检: {{ msg.evaluation.grade }}
+                      </span>
+                      <div class="qs-dims-list">
+                        <span class="qs-dim-item" v-for="(dim, dKey) in msg.evaluation.dimensions" :key="dKey">
+                          <span class="dim-k">{{ dim.dimension_name }}:</span>
+                          <strong class="dim-v" :class="getScoreColorClass(dim.score)">{{ dim.score }}分</strong>
+                        </span>
+                      </div>
+                    </div>
+                    <div class="quality-strip-right" v-if="msg.evaluation.metrics?.total_route_distance_km">
+                      <span class="qs-dist-pill">🛣️ 动线 {{ msg.evaluation.metrics.total_route_distance_km }}km</span>
                     </div>
                   </div>
 
@@ -811,6 +869,17 @@
         <div class="canvas-title">
           <span>🗺️ 行程看板</span>
           <span class="city-sub">{{ currentPlan.city }} · {{ currentPlan.days.length }}天</span>
+          <!-- 看板顶栏质量评分胶囊 -->
+          <div
+            class="canvas-header-score-pill"
+            v-if="canvasEvaluation"
+            :class="getScoreColorClass(canvasEvaluation.overall_score)"
+            :title="`行程综合质量评估: ${canvasEvaluation.overall_score}分 (${canvasEvaluation.grade})`"
+          >
+            <span class="cs-icon">🎯</span>
+            <span class="cs-score">{{ canvasEvaluation.overall_score }}分</span>
+            <span class="cs-grade">{{ canvasEvaluation.grade.split(' ')[0] }}</span>
+          </div>
         </div>
         <div class="canvas-header-actions">
           <a-dropdown>
@@ -849,6 +918,69 @@
           </div>
           <div id="workspace-amap" class="map-container"></div>
           <div class="map-status-overlay" v-if="mapStatus">{{ mapStatus }}</div>
+        </div>
+
+        <!-- 🎯 行程质量与健康度看板卡片 (Phase 6 质量评估体系) -->
+        <div class="canvas-quality-card" v-if="canvasEvaluation">
+          <div class="quality-card-header">
+            <div class="quality-title-wrap">
+              <span class="q-icon">🎯</span>
+              <span class="q-title">行程质量与健康度</span>
+              <span class="q-grade-badge" :class="getScoreColorClass(canvasEvaluation.overall_score)">
+                {{ canvasEvaluation.grade }}
+              </span>
+            </div>
+            <a-button size="small" type="text" class="q-refresh-btn" :loading="evalLoading" @click="currentPlan && refreshCanvasEvaluation(currentPlan)">
+              🔄 重新质检
+            </a-button>
+          </div>
+
+          <div class="quality-score-row">
+            <div class="q-score-big-box" :class="getScoreColorClass(canvasEvaluation.overall_score)">
+              <div class="q-score-big">{{ canvasEvaluation.overall_score }}</div>
+              <div class="q-score-unit">综合质检分</div>
+            </div>
+            <div class="q-dimensions-bars">
+              <div class="q-dim-bar-item" v-for="(dim, k) in canvasEvaluation.dimensions" :key="k">
+                <div class="q-dim-text">
+                  <span class="dim-name">{{ dim.dimension_name }}</span>
+                  <span class="dim-val" :class="getScoreColorClass(dim.score)">{{ dim.score }}分</span>
+                </div>
+                <div class="q-progress-bg">
+                  <div
+                    class="q-progress-fill"
+                    :class="getScoreColorClass(dim.score)"
+                    :style="{ width: dim.score + '%' }"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="quality-metrics-chips" v-if="canvasEvaluation.metrics">
+            <div class="q-m-chip">
+              <span class="m-icon">🛣️</span>
+              <span class="m-text">总动线: <strong>{{ canvasEvaluation.metrics.total_route_distance_km || 0 }}km</strong></span>
+            </div>
+            <div class="q-m-chip">
+              <span class="m-icon">🚀</span>
+              <span class="m-text">最远单段: <strong>{{ canvasEvaluation.metrics.max_single_leg_km || 0 }}km</strong></span>
+            </div>
+            <div class="q-m-chip" :class="{ 'is-ok': canvasEvaluation.metrics.budget_arithmetic_valid }">
+              <span class="m-icon">{{ canvasEvaluation.metrics.budget_arithmetic_valid ? '✅' : '⚠️' }}</span>
+              <span class="m-text">{{ canvasEvaluation.metrics.budget_arithmetic_valid ? '预算严密平衡' : '预算存在差额' }}</span>
+            </div>
+          </div>
+
+          <!-- 智能质检贴士 (如有) -->
+          <div class="quality-suggestions-box" v-if="canvasEvaluation.suggestions && canvasEvaluation.suggestions.length">
+            <div class="sugg-header">💡 智能质检贴士：</div>
+            <ul class="sugg-list">
+              <li v-for="(sugg, sIdx) in canvasEvaluation.suggestions.slice(0, 2)" :key="sIdx">
+                {{ sugg }}
+              </li>
+            </ul>
+          </div>
         </div>
 
         <!-- 目的地天气预报卡片 (重点新增) -->
@@ -945,7 +1077,7 @@ import 'leaflet/dist/leaflet.css'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import dayjs from 'dayjs'
-import type { TripPlan, TripFormData, ChatMessage, ChatSession, AgentNodeStatus, StreamEvent, POIInfo } from '@/types'
+import type { TripPlan, TripFormData, ChatMessage, ChatSession, AgentNodeStatus, StreamEvent, POIInfo, EvaluationReport } from '@/types'
 import {
   generateTripPlanStream,
   chatModifyTripPlan,
@@ -953,6 +1085,7 @@ import {
   routeChatIntent,
   prepareTripPlan,
   confirmTripPlan,
+  evaluateTripPlan,
 } from '@/services/api'
 
 const router = useRouter()
@@ -970,6 +1103,8 @@ const sessions = ref<ChatSession[]>([])
 const currentSessionId = ref<string>('')
 const messages = ref<ChatMessage[]>([])
 const currentPlan = ref<TripPlan | null>(null)
+const canvasEvaluation = ref<EvaluationReport | null>(null)
+const evalLoading = ref(false)
 const streamProgress = ref(0)
 const currentLiveStepText = ref('')
 
@@ -1051,6 +1186,30 @@ const activeTitle = computed(() => {
   return '智能旅行助手'
 })
 
+// 评分色彩与等级辅助函数 (Phase 6 质量评估体系)
+const getScoreColorClass = (score?: number) => {
+  if (score === undefined || score === null) return 'score-good'
+  if (score >= 90) return 'score-excellent'
+  if (score >= 75) return 'score-good'
+  if (score >= 60) return 'score-pass'
+  return 'score-poor'
+}
+
+const refreshCanvasEvaluation = async (plan: TripPlan) => {
+  if (!plan) return null
+  evalLoading.value = true
+  try {
+    const report = await evaluateTripPlan(plan, currentSessionId.value || undefined)
+    canvasEvaluation.value = report
+    return report
+  } catch (err) {
+    console.warn('自动化评估行程质量异常:', err)
+    return null
+  } finally {
+    evalLoading.value = false
+  }
+}
+
 // 地图实例与状态
 let mapInstance: any = null
 let mapProvider: 'amap' | 'leaflet' | null = null
@@ -1116,6 +1275,7 @@ const startNewSession = () => {
   currentSessionId.value = newId
   messages.value = []
   currentPlan.value = null
+  canvasEvaluation.value = null
   showCanvas.value = false
   saveSessionsToStorage()
 }
@@ -1128,6 +1288,14 @@ const switchSession = (sessionId: string) => {
     currentPlan.value = session.tripPlan || null
     if (currentPlan.value) {
       sessionStorage.setItem('tripPlan', JSON.stringify(currentPlan.value))
+      const latestMsgWithEval = [...(session.messages || [])].reverse().find(m => m.evaluation)
+      if (latestMsgWithEval?.evaluation) {
+        canvasEvaluation.value = latestMsgWithEval.evaluation
+      } else {
+        void refreshCanvasEvaluation(currentPlan.value)
+      }
+    } else {
+      canvasEvaluation.value = null
     }
   }
   saveSessionsToStorage()
@@ -1503,8 +1671,17 @@ const handleChatStreamingGeneration = async (input: string | TripFormData, exist
           const plan = evt.data as TripPlan
           currentPlan.value = plan
           assistantMsg.planData = plan
+          if (evt.evaluation) {
+            assistantMsg.evaluation = evt.evaluation
+            canvasEvaluation.value = evt.evaluation
+          } else {
+            void refreshCanvasEvaluation(plan).then(rep => {
+              if (rep) assistantMsg.evaluation = rep
+            })
+          }
           assistantMsg.loading = false
-          assistantMsg.content = `✨ 已为您生成定制的【${plan.city}】${plan.days.length}天行程！总体预算预估 ¥${plan.budget?.total || 0}。`
+          const scoreText = evt.evaluation ? ` 🎯 综合质检 ${evt.evaluation.overall_score}分 (${evt.evaluation.grade.split(' ')[0]})，` : ' '
+          assistantMsg.content = `✨ 已为您生成定制的【${plan.city}】${plan.days.length}天行程！${scoreText}总体预算预估 ¥${plan.budget?.total || 0}。`
           streamProgress.value = 100
           currentLiveStepText.value = '行程规划已就绪！'
 
@@ -1928,9 +2105,18 @@ const handleConfirmInChatHitl = async (msg: ChatMessage) => {
       const plan = res.data
       currentPlan.value = plan
       msg.planData = plan
+      if (res.evaluation) {
+        msg.evaluation = res.evaluation
+        canvasEvaluation.value = res.evaluation
+      } else {
+        void refreshCanvasEvaluation(plan).then(rep => {
+          if (rep) msg.evaluation = rep
+        })
+      }
       msg.loading = false
       msg.hitlSubmitting = false
-      msg.content = `🎉 太棒了！已根据您挑选的 ${selectedAttractions.length} 处景点与住宿安排，生成了量身定制的【${plan.city}】${plan.days.length}天深度游行程！`
+      const scoreTxt = res.evaluation ? ` (🎯 综合质检 ${res.evaluation.overall_score}分 · ${res.evaluation.grade.split(' ')[0]})` : ''
+      msg.content = `🎉 太棒了！已根据您挑选的 ${selectedAttractions.length} 处景点与住宿安排，生成了量身定制的【${plan.city}】${plan.days.length}天深度游行程！${scoreTxt}`
 
       // 标记推演所有节点完成
       markLastRunningStepDone(msg)
@@ -2071,11 +2257,21 @@ const handleChatModification = async (text: string) => {
     if (res.success && res.data) {
       assistantMsg.content = res.data.reply
       assistantMsg.changesSummary = res.data.changes_summary
+      if (res.data.evaluation) {
+        assistantMsg.evaluation = res.data.evaluation
+        canvasEvaluation.value = res.data.evaluation
+      }
 
       if (res.data.updated_plan && res.data.modified) {
         currentPlan.value = res.data.updated_plan
         assistantMsg.planData = res.data.updated_plan
         sessionStorage.setItem('tripPlan', JSON.stringify(res.data.updated_plan))
+
+        if (!res.data.evaluation) {
+          void refreshCanvasEvaluation(res.data.updated_plan).then(rep => {
+            if (rep) assistantMsg.evaluation = rep
+          })
+        }
 
         // 更新历史持久化
         const session = sessions.value.find(s => s.id === currentSessionId.value)
@@ -2110,6 +2306,9 @@ const handleChatModification = async (text: string) => {
 const openCanvasWithPlan = (plan: TripPlan) => {
   currentPlan.value = plan
   showCanvas.value = true
+  if (!canvasEvaluation.value) {
+    void refreshCanvasEvaluation(plan)
+  }
   nextTick(() => {
     initWorkspaceMap()
   })
@@ -5613,5 +5812,435 @@ watch(currentPlan, (newPlan) => {
 .spot-chip-rag-dot {
   font-size: 10px;
   cursor: help;
+}
+
+/* ==========================================================================
+   Phase 6: 多维评估体系与质检分数样式 (Chat Stream & Kanban)
+   ========================================================================== */
+
+/* 评分色彩体系 */
+.score-excellent {
+  color: #059669 !important;
+}
+.score-good {
+  color: #2563eb !important;
+}
+.score-pass {
+  color: #d97706 !important;
+}
+.score-poor {
+  color: #dc2626 !important;
+}
+
+/* 1. 对话生成行程卡片顶栏评分徽章 */
+.plan-score-badge-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  border: 1px solid #bfdbfe;
+  background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.08);
+  transition: transform 0.2s ease;
+}
+
+.plan-score-badge-header:hover {
+  transform: translateY(-1px);
+}
+
+.plan-score-badge-header.score-excellent {
+  background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+  border-color: #a7f3d0;
+}
+
+.plan-score-badge-header.score-pass {
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border-color: #fde68a;
+}
+
+.score-badge-icon {
+  font-size: 16px;
+}
+
+.score-badge-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.score-badge-val {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+}
+
+.score-badge-label {
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+/* 2. 对话行程卡片多维质检评分微栏 */
+.plan-quality-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.quality-strip-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.qs-lead-tag {
+  font-size: 11px;
+  font-weight: 700;
+  background: #ffffff;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+}
+
+.qs-dims-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qs-dim-item {
+  font-size: 11px;
+  color: #475569;
+  background: #ffffff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+
+.qs-dim-item .dim-k {
+  color: #64748b;
+  margin-right: 3px;
+}
+
+.qs-dist-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #0369a1;
+  background: #e0f2fe;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid #bae6fd;
+}
+
+/* 3. 修改摘要条中的质检评分标签 */
+.changes-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.banner-text-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.banner-score-tag {
+  font-size: 11px;
+  font-weight: 700;
+  background: #ffffff;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid #bfdbfe;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* 4. 微调完成后的独立质检小胶囊卡 */
+.mod-quality-pill {
+  background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%);
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mod-quality-pill .pill-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.mod-quality-pill .pill-grade-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  background: #ffffff;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+}
+
+.mod-quality-pill .pill-dims {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.mod-quality-pill .p-sep {
+  color: #cbd5e1;
+}
+
+/* 5. 看板顶栏评分胶囊 */
+.canvas-header-score-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  background: #ffffff;
+  border: 1px solid #bbf7d0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  margin-left: 6px;
+}
+
+.canvas-header-score-pill.score-excellent {
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+}
+
+.canvas-header-score-pill.score-good {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.canvas-header-score-pill .cs-score {
+  font-weight: 800;
+}
+
+.canvas-header-score-pill .cs-grade {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+/* 6. 看板专属质量与健康度卡片 (Canvas Quality Card) */
+.canvas-quality-card {
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+
+.quality-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.quality-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quality-title-wrap .q-icon {
+  font-size: 15px;
+}
+
+.quality-title-wrap .q-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.quality-title-wrap .q-grade-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+}
+
+.q-refresh-btn {
+  font-size: 11px;
+  color: #64748b;
+  padding: 0 4px;
+}
+
+.quality-score-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.q-score-big-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 14px;
+  background: #ffffff;
+  border: 2px solid #e2e8f0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+  flex-shrink: 0;
+}
+
+.q-score-big-box.score-excellent {
+  border-color: #34d399;
+  background: linear-gradient(135deg, #ffffff, #f0fdf4);
+}
+
+.q-score-big-box.score-good {
+  border-color: #60a5fa;
+  background: linear-gradient(135deg, #ffffff, #eff6ff);
+}
+
+.q-score-big {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.q-score-unit {
+  font-size: 9px;
+  font-weight: 600;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+.q-dimensions-bars {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.q-dim-bar-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.q-dim-text {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.q-dim-text .dim-name {
+  color: #475569;
+  font-weight: 500;
+}
+
+.q-dim-text .dim-val {
+  font-weight: 700;
+}
+
+.q-progress-bg {
+  width: 100%;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.q-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+  background: #3b82f6;
+}
+
+.q-progress-fill.score-excellent {
+  background: linear-gradient(90deg, #10b981, #059669);
+}
+
+.q-progress-fill.score-good {
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+}
+
+.q-progress-fill.score-pass {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+}
+
+.q-progress-fill.score-poor {
+  background: linear-gradient(90deg, #ef4444, #dc2626);
+}
+
+/* 动线与预算指标小胶囊 */
+.quality-metrics-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.q-m-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.q-m-chip.is-ok {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+/* 质检建议条目 */
+.quality-suggestions-box {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.quality-suggestions-box .sugg-header {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #475569;
+  margin-bottom: 4px;
+}
+
+.quality-suggestions-box .sugg-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 10.5px;
+  color: #64748b;
+  line-height: 1.4;
 }
 </style>

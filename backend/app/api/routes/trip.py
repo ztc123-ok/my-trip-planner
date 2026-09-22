@@ -20,6 +20,8 @@ from ...models.schemas import (
     NaturalLanguageParseResponse,
     ChatIntentRouteRequest,
     ChatIntentRouteResponse,
+    PlanEvaluationRequest,
+    PlanEvaluationResponse,
 )
 from ...agents.trip_planner_agent import (
     get_trip_planner_agent,
@@ -27,6 +29,8 @@ from ...agents.trip_planner_agent import (
     classify_chat_intent,
 )
 from ...agents.chat_modify_agent import get_chat_modify_agent
+from ...services.eval_service import evaluate_plan
+from ...services.observability_service import record_evaluation_feedback, get_observability_status
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
@@ -72,13 +76,22 @@ async def plan_trip(request: TripRequest):
         else:
             trip_plan = await run_in_threadpool(agent.plan_trip, request)
 
+        # 自动化多维质量评估与 LangSmith 反馈上报 (Phase 6)
+        eval_report = None
+        try:
+            eval_report = await run_in_threadpool(evaluate_plan, trip_plan)
+            await run_in_threadpool(record_evaluation_feedback, report=eval_report, thread_id=tid)
+        except Exception as eval_err:
+            print(f"⚠️ 自动化评估上报异常 (降级运行): {eval_err}")
+
         print("✅ 旅行计划生成成功,准备返回响应\n")
 
         return TripPlanResponse(
             success=True,
             message="旅行计划生成成功",
             data=trip_plan,
-            thread_id=tid
+            thread_id=tid,
+            evaluation=eval_report
         )
 
     except Exception as e:
@@ -187,11 +200,19 @@ async def confirm_trip_plan(request: PlanConfirmRequest):
             end_date=request.end_date,
         )
 
+        eval_report = None
+        try:
+            eval_report = await run_in_threadpool(evaluate_plan, trip_plan)
+            await run_in_threadpool(record_evaluation_feedback, report=eval_report, thread_id=request.thread_id)
+        except Exception as eval_err:
+            print(f"⚠️ HITL 确认计划自动化评估异常 (降级运行): {eval_err}")
+
         return TripPlanResponse(
             success=True,
             message="旅行计划生成成功（已融入用户确认要求）",
             data=trip_plan,
-            thread_id=request.thread_id
+            thread_id=request.thread_id,
+            evaluation=eval_report
         )
     except Exception as e:
         print(f"❌ HITL 确认恢复旅行计划失败: {str(e)}")
@@ -350,3 +371,43 @@ async def health_check():
             status_code=503,
             detail=f"服务不可用: {str(e)}"
         )
+
+
+@router.post(
+    "/evaluate",
+    response_model=PlanEvaluationResponse,
+    summary="行程结构化质量评估",
+    description="对旅行计划执行多维度结构化量化评估（完整性、地理合理性、预算严密性），并可选回传 LangSmith",
+)
+async def evaluate_trip_plan_route(request: PlanEvaluationRequest):
+    """执行旅行计划的多维度质量评估"""
+    try:
+        report = await run_in_threadpool(evaluate_plan, request.trip_plan)
+        if request.thread_id:
+            await run_in_threadpool(
+                record_evaluation_feedback,
+                report=report,
+                thread_id=request.thread_id,
+            )
+        return PlanEvaluationResponse(
+            success=True,
+            message="评估完成",
+            data=report,
+        )
+    except Exception as e:
+        print(f"❌ 行程评估失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"行程评估失败: {str(e)}")
+
+
+@router.get(
+    "/observability/status",
+    summary="获取系统可观测性与 Tracing 状态",
+    description="查询当前 LangSmith 追踪是否已激活、工程配置及连通性状态",
+)
+async def get_observability_status_route():
+    """查询系统可观测性状态"""
+    return {
+        "success": True,
+        "data": get_observability_status(),
+    }
+

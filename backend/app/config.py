@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v3"
 
 
+    # LangSmith 可观测性配置 (Phase 6)
+    langchain_tracing_v2: bool = False
+    langchain_api_key: str = ""
+    langchain_project: str = "my-trip-planner"
+    langchain_endpoint: str = "https://api.smith.langchain.com"
+
     class Config:
         env_file = ".env"
         case_sensitive = False
@@ -58,6 +64,25 @@ class Settings(BaseSettings):
     def get_cors_origins_list(self) -> List[str]:
         """获取CORS origins列表"""
         return [origin.strip() for origin in self.cors_origins.split(',')]
+
+    def setup_langsmith_env(self) -> bool:
+        """根据配置激活 LangSmith Tracing 环境变量，返回是否已启用"""
+        tracing_enabled = (
+            str(os.getenv("LANGCHAIN_TRACING_V2", "")).lower() in ("true", "1")
+            or self.langchain_tracing_v2
+        )
+        api_key = os.getenv("LANGCHAIN_API_KEY") or self.langchain_api_key
+        if tracing_enabled and api_key:
+            os.environ["LANGCHAIN_TRACING_V2"] = "true"
+            os.environ["LANGCHAIN_API_KEY"] = api_key
+            os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT") or self.langchain_project
+            os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT") or self.langchain_endpoint
+            return True
+        elif tracing_enabled and not api_key:
+            # 未提供 API Key 则优雅降级，关闭追踪以避免警告或网络超时
+            os.environ["LANGCHAIN_TRACING_V2"] = "false"
+            return False
+        return False
 
 
 # 创建全局配置实例
@@ -92,6 +117,9 @@ def validate_config():
         for w in warnings:
             print(f"  - {w}")
 
+    # 初始化 LangSmith 观测环境
+    settings.setup_langsmith_env()
+
     return True
 
 
@@ -112,3 +140,7 @@ def print_config():
     print(f"LLM Base URL: {llm_base_url}")
     print(f"LLM Model: {llm_model}")
     print(f"日志级别: {settings.log_level}")
+
+    # 检查 LangSmith 配置
+    ls_active = settings.setup_langsmith_env()
+    print(f"LangSmith Tracing: {'已启用 (项目: ' + (os.getenv('LANGCHAIN_PROJECT') or settings.langchain_project) + ')' if ls_active else '未启用 (未配置或无 API Key)'}")

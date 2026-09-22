@@ -1,6 +1,6 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict, Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import date
 
@@ -179,6 +179,7 @@ class TripPlanResponse(BaseModel):
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
     thread_id: Optional[str] = Field(default=None, description="规划会话ID")
+    evaluation: Optional['EvaluationReport'] = Field(default=None, description="行程质量与健康度评估报告")
 
 
 class POIInfo(BaseModel):
@@ -323,6 +324,39 @@ class ChatModifyRequest(BaseModel):
     chat_history: List[ChatMessage] = Field(default=[], description="对话历史上下文")
 
 
+# ============ Phase 6: 评估与可观测性模型 ============
+
+class EvaluationIssue(BaseModel):
+    """评估发现的缺陷或优化建议"""
+    dimension: str = Field(..., description="所属维度: completeness / geography / budget / overall")
+    severity: Literal["error", "warning", "info"] = Field(..., description="严重级别: error(严重扣分) / warning(警告轻微扣分) / info(建议)")
+    message: str = Field(..., description="问题描述")
+    day_index: Optional[int] = Field(default=None, description="相关的天数序号 (从0开始)")
+    suggestion: Optional[str] = Field(default=None, description="具体的改进建议")
+
+
+class DimensionScore(BaseModel):
+    """单维度评估结果"""
+    dimension: str = Field(..., description="维度名称: completeness / geography / budget")
+    dimension_name: str = Field(..., description="维度中文名称: 计划完整性 / 地理合理性 / 预算一致性")
+    score: float = Field(..., ge=0.0, le=100.0, description="得分 (0-100)")
+    weight: float = Field(..., ge=0.0, le=1.0, description="权重")
+    passed: bool = Field(..., description="该维度是否达到及格线 (>=60)")
+    details: Dict[str, Any] = Field(default_factory=dict, description="评估细项指标数据")
+
+
+class EvaluationReport(BaseModel):
+    """旅行规划全方位综合评估报告"""
+    overall_score: float = Field(..., ge=0.0, le=100.0, description="综合加权得分 (0-100)")
+    grade: str = Field(..., description="评级: 卓越 (EXCELLENT) | 良好 (GOOD) | 及格 (ACCEPTABLE) | 待改进 (NEEDS_IMPROVEMENT)")
+    passed: bool = Field(..., description="整体是否合格 (>=60 且无致命错误)")
+    dimensions: Dict[str, DimensionScore] = Field(..., description="三大维度的具体评估结果")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="量化指标汇总（如动线总公里数、平均跨度等）")
+    issues: List[EvaluationIssue] = Field(default_factory=list, description="问题与扣分项明细")
+    suggestions: List[str] = Field(default_factory=list, description="精选优化建议清单")
+    created_at: str = Field(default="", description="评估生成时间戳")
+
+
 class ChatModifyData(BaseModel):
     """对话式行程修改结果数据"""
     reply: str = Field(..., description="AI 助手针对修改的自然语言回复说明")
@@ -330,6 +364,7 @@ class ChatModifyData(BaseModel):
     modified: bool = Field(default=True, description="是否发生了行程变更")
     thread_id: str = Field(..., description="当前规划会话ID")
     changes_summary: Optional[str] = Field(default=None, description="修改摘要简述")
+    evaluation: Optional[EvaluationReport] = Field(default=None, description="更新后行程的质量评估报告")
 
 
 class ChatModifyResponse(BaseModel):
@@ -363,6 +398,7 @@ class PlanStreamEvent(BaseModel):
     elapsed_seconds: Optional[float] = Field(default=None, description="自开始起累计耗时秒数")
     data: Optional[Union[dict, list, TripPlan]] = Field(default=None, description="事件携带的结构化数据")
     thread_id: Optional[str] = Field(default=None, description="会话ID")
+    evaluation: Optional[EvaluationReport] = Field(default=None, description="流式规划完成附带的评估报告")
 
 
 class ChatIntentRouteRequest(BaseModel):
@@ -385,6 +421,25 @@ class ChatIntentRouteResponse(BaseModel):
     success: bool = Field(default=True, description="是否成功")
     message: str = Field(default="意图识别成功", description="消息")
     data: Optional[ChatIntentRouteData] = Field(default=None, description="意图路由判定数据")
+
+
+
+
+class PlanEvaluationRequest(BaseModel):
+    """计划评估请求"""
+    trip_plan: TripPlan = Field(..., description="待评估的旅行计划")
+    thread_id: Optional[str] = Field(default=None, description="可选关联的会话ID (用于将评估结果关联至 LangSmith)")
+
+
+class PlanEvaluationResponse(BaseModel):
+    """计划评估接口响应"""
+    success: bool = Field(default=True, description="是否成功")
+    message: str = Field(default="评估完成", description="提示消息")
+    data: Optional[EvaluationReport] = Field(default=None, description="评估报告")
+
+
+TripPlanResponse.model_rebuild()
+
 
 
 

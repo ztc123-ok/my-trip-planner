@@ -30,6 +30,8 @@ from ..models.schemas import (
 )
 from ..services.amap_service import AmapService, create_amap_tool
 from ..services.llm_service import get_chat_model, get_llm
+from ..services.observability_service import safe_traceable, record_evaluation_feedback
+from ..services.eval_service import evaluate_plan
 from ..services.mcp_tool_adapter import (
     convert_mcp_to_langchain_tools,
     create_amap_langchain_tools,
@@ -366,6 +368,7 @@ class ChatModifyAgent:
                 "error": str(exc),
             }
 
+    @safe_traceable(name="ChatModifyAgent.modify_plan", run_type="chain")
     def modify_plan(self, request: ChatModifyRequest) -> ChatModifyData:
         """对外调用入口：执行基于 ReAct 循环的行程修改子图"""
         tid = request.thread_id or f"chat_{uuid.uuid4().hex[:12]}"
@@ -393,12 +396,22 @@ class ChatModifyAgent:
         except Exception:
             validated_plan = request.trip_plan
 
+        rep = None
+        # 若行程发生了有效调整，执行结构化质量评估并回传反馈
+        if result.get("modified", True):
+            try:
+                rep = evaluate_plan(validated_plan)
+                record_evaluation_feedback(rep, thread_id=tid)
+            except Exception as eval_err:
+                logger.debug("ChatModifyAgent 评估上报跳过: %s", eval_err)
+
         return ChatModifyData(
             reply=result.get("reply", "已为您调整行程！"),
             updated_plan=validated_plan,
             modified=result.get("modified", True),
             thread_id=tid,
             changes_summary=result.get("changes_summary"),
+            evaluation=rep,
         )
 
 
