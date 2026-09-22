@@ -1,6 +1,6 @@
 # 智能旅行助手
 
-参考 `helloagents-trip-planner` 逐步实现的旅行规划应用。后端使用 FastAPI、LangGraph、OpenAI 兼容模型客户端和高德地图 MCP；前端使用 Vue 3、TypeScript、Vite 和 Ant Design Vue。
+后端使用 FastAPI、LangGraph、OpenAI 兼容模型客户端和高德地图 MCP；前端使用 Vue 3、TypeScript、Vite 和 Ant Design Vue。
 
 ## 功能
 
