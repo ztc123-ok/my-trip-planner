@@ -37,7 +37,7 @@
           </div>
 
           <a-row :gutter="24">
-            <a-col :span="8">
+            <a-col :xs="24" :sm="12" :lg="8">
               <a-form-item name="city" :rules="[{ required: true, message: '请输入目的地城市' }]">
                 <template #label>
                   <span class="form-label">目的地城市</span>
@@ -54,7 +54,7 @@
                 </a-input>
               </a-form-item>
             </a-col>
-            <a-col :span="6">
+            <a-col :xs="24" :sm="12" :lg="6">
               <a-form-item name="start_date" :rules="[{ required: true, message: '请选择开始日期' }]">
                 <template #label>
                   <span class="form-label">开始日期</span>
@@ -68,7 +68,7 @@
                 />
               </a-form-item>
             </a-col>
-            <a-col :span="6">
+            <a-col :xs="24" :sm="12" :lg="6">
               <a-form-item name="end_date" :rules="[{ required: true, message: '请选择结束日期' }]">
                 <template #label>
                   <span class="form-label">结束日期</span>
@@ -82,7 +82,7 @@
                 />
               </a-form-item>
             </a-col>
-            <a-col :span="4">
+            <a-col :xs="24" :sm="12" :lg="4">
               <a-form-item>
                 <template #label>
                   <span class="form-label">旅行天数</span>
@@ -104,7 +104,7 @@
           </div>
 
           <a-row :gutter="24">
-            <a-col :span="8">
+            <a-col :xs="24" :sm="12" :lg="8">
               <a-form-item name="transportation">
                 <template #label>
                   <span class="form-label">交通方式</span>
@@ -117,7 +117,7 @@
                 </a-select>
               </a-form-item>
             </a-col>
-            <a-col :span="8">
+            <a-col :xs="24" :sm="12" :lg="8">
               <a-form-item name="accommodation">
                 <template #label>
                   <span class="form-label">住宿偏好</span>
@@ -130,7 +130,7 @@
                 </a-select>
               </a-form-item>
             </a-col>
-            <a-col :span="8">
+            <a-col :xs="24" :sm="24" :lg="8">
               <a-form-item name="preferences">
                 <template #label>
                   <span class="form-label">旅行偏好</span>
@@ -225,6 +225,7 @@
       v-model:open="hitlModalVisible"
       title="🤝 人机协同：确认候选景点与酒店"
       width="900px"
+      wrap-class-name="trip-candidates-modal"
       :confirm-loading="confirming"
       ok-text="确认并生成行程计划"
       cancel-text="放弃本次规划"
@@ -243,7 +244,7 @@
         <div class="hitl-poi-scroll">
           <a-checkbox-group v-model:value="selectedAttractions" style="width: 100%;">
             <a-row :gutter="[12, 12]">
-              <a-col :span="12" v-for="poi in candidateData.candidate_attractions" :key="poi.name">
+              <a-col :xs="24" :sm="12" v-for="poi in candidateData.candidate_attractions" :key="poi.name">
                 <div class="poi-select-card" :class="{ 'card-selected': selectedAttractions.includes(poi.name) }">
                   <a-checkbox :value="poi.name" class="poi-checkbox">
                     <div class="poi-info-content">
@@ -261,7 +262,7 @@
         <div class="hitl-poi-scroll">
           <a-radio-group v-model:value="selectedHotel" style="width: 100%;">
             <a-row :gutter="[12, 12]">
-              <a-col :span="12" v-for="hotel in candidateData.candidate_hotels" :key="hotel.name">
+              <a-col :xs="24" :sm="12" v-for="hotel in candidateData.candidate_hotels" :key="hotel.name">
                 <div class="poi-select-card hotel-select-card" :class="{ 'card-selected': selectedHotel === hotel.name }">
                   <a-radio :value="hotel.name" class="hotel-radio">
                     <div class="hotel-content">
@@ -1084,6 +1085,67 @@ const handleCancelHitl = () => {
   text-overflow: ellipsis;
   max-width: 220px;
   flex-shrink: 1;
+}
+
+@media (max-width: 767px) {
+  .home-container {
+    min-height: auto;
+    padding: 28px 12px calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+  .page-header { margin-bottom: 24px; }
+  .icon-wrapper { margin-bottom: 8px; }
+  .icon { font-size: 48px; }
+  .page-title { font-size: 30px; letter-spacing: 0; margin-bottom: 10px; }
+  .page-subtitle { font-size: 14px; line-height: 1.7; }
+  .page-header :deep(.ant-btn) {
+    max-width: 100%;
+    height: auto;
+    min-height: 44px;
+    padding: 10px 14px;
+    white-space: normal;
+    font-size: 14px;
+  }
+  .form-card { border-radius: 16px; }
+  .form-card :deep(.ant-card-body) { padding: 14px; }
+  .form-section { padding: 16px 12px 0; margin-bottom: 16px; }
+  .form-section:hover { transform: none; }
+  .section-header { margin-bottom: 16px; }
+  .section-title { font-size: 16px; }
+  .home-container :deep(.ant-col) { min-width: 0; }
+  .home-container :deep(.ant-form-item) { margin-bottom: 18px; }
+  .home-container :deep(input), .home-container :deep(textarea) { font-size: 16px; }
+  .home-container :deep(.ant-select), .home-container :deep(.ant-picker) { width: 100%; }
+  .custom-checkbox-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 4px; }
+  .preference-tag { min-height: 44px; margin: 0; display: flex; align-items: center; font-size: 13px; }
+  .hitl-switch-card { padding: 14px 12px; gap: 12px; align-items: flex-start; }
+  .hitl-switch-info { min-width: 0; gap: 8px; align-items: flex-start; }
+  .hitl-switch-icon { font-size: 20px; }
+  .hitl-switch-title { font-size: 14px; overflow-wrap: anywhere; }
+  .hitl-switch-desc { margin-top: 6px; line-height: 1.6; }
+  .hitl-switch-card :deep(.ant-switch) { flex-shrink: 0; margin-top: 4px; }
+  .submit-button { height: auto; min-height: 52px; padding: 12px 8px; font-size: 15px; white-space: normal; }
+  .loading-container { padding: 16px 10px; }
+  .loading-status { font-size: 14px; overflow-wrap: anywhere; }
+  .hotel-card-header, .hotel-meta-row { flex-wrap: wrap; }
+  .hotel-name { white-space: normal; }
+}
+</style>
+
+<!-- Ant Design teleports dialogs outside the page's scoped root. -->
+<style>
+@media (max-width: 767px) {
+  .trip-candidates-modal .ant-modal {
+    top: 12px;
+    max-width: calc(100vw - 24px);
+    margin: 0 auto;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .trip-candidates-modal .ant-modal-content { padding: 18px 14px; }
+  .trip-candidates-modal .ant-modal-title { padding-right: 24px; font-size: 16px; }
+  .trip-candidates-modal .ant-modal-footer { display: flex; flex-direction: column-reverse; gap: 8px; }
+  .trip-candidates-modal .ant-modal-footer .ant-btn { margin: 0; height: auto; min-height: 44px; white-space: normal; }
+  .trip-candidates-modal .hitl-modal-body { max-height: 58vh; max-height: 58dvh; }
+  .trip-candidates-modal input, .trip-candidates-modal textarea { font-size: 16px; }
 }
 </style>
 

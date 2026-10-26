@@ -1,23 +1,41 @@
 <template>
-  <div class="workspace-layout">
+  <div class="workspace-layout" :style="{ '--workspace-height': viewportHeight }">
+    <button
+      v-if="isMobile && mobileSidebarOpen"
+      class="sidebar-backdrop"
+      aria-label="关闭会话列表"
+      tabindex="-1"
+      @click="closeMobileSidebar"
+    ></button>
     <!-- 左侧侧边栏 (Sidebar) -->
-    <aside class="workspace-sidebar" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+    <aside
+      id="workspace-sessions"
+      ref="sidebarRef"
+      class="workspace-sidebar"
+      :class="{ 'sidebar-collapsed': sidebarCollapsed && !isMobile, 'mobile-open': mobileSidebarOpen }"
+      :inert="(isMobile && !mobileSidebarOpen) || (isCompact && showCanvas && !!currentPlan)"
+      :role="isMobile ? 'dialog' : undefined"
+      :aria-modal="isMobile && mobileSidebarOpen ? true : undefined"
+      aria-label="规划会话列表"
+      @keydown="trapPanelFocus"
+    >
       <div class="sidebar-top">
         <div class="brand-header">
           <div class="brand-icon">✈️</div>
-          <div class="brand-text" v-if="!sidebarCollapsed">
+          <div class="brand-text" v-if="!sidebarCollapsed || isMobile">
             <h2 class="brand-title">TripPlanner</h2>
             <span class="brand-subtitle">AI 旅行决策工作台</span>
           </div>
+          <button v-if="isMobile" class="mobile-icon-btn sidebar-close-btn" aria-label="关闭会话列表" @click="closeMobileSidebar">×</button>
         </div>
 
         <button class="new-chat-btn" @click="startNewSession" :title="sidebarCollapsed ? '新建会话' : ''">
           <span class="btn-icon">＋</span>
-          <span class="btn-text" v-if="!sidebarCollapsed">新建规划会话</span>
+          <span class="btn-text" v-if="!sidebarCollapsed || isMobile">新建规划会话</span>
         </button>
       </div>
 
-      <div class="session-list-section" v-if="!sidebarCollapsed">
+      <div class="session-list-section" v-if="!sidebarCollapsed || isMobile">
         <div class="section-title">最近规划会话</div>
         <div class="session-list" v-if="sessions.length > 0">
           <div
@@ -43,7 +61,7 @@
       </div>
 
       <div class="sidebar-bottom">
-        <div class="engine-badge" v-if="!sidebarCollapsed">
+        <div class="engine-badge" v-if="!sidebarCollapsed || isMobile">
           <div class="status-indicator"></div>
           <div class="engine-info">
             <div class="engine-name">Qwen3.8-Flash 接入</div>
@@ -54,9 +72,9 @@
         <div class="sidebar-actions">
           <button class="switch-mode-btn" @click="goToClassicForm" :title="sidebarCollapsed ? '经典表单模式' : ''">
             <span>📋</span>
-            <span v-if="!sidebarCollapsed">经典表单模式</span>
+            <span v-if="!sidebarCollapsed || isMobile">经典表单模式</span>
           </button>
-          <button class="toggle-sidebar-btn" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开' : '收起'">
+          <button v-if="!isMobile" class="toggle-sidebar-btn" @click="sidebarCollapsed = !sidebarCollapsed" :title="sidebarCollapsed ? '展开' : '收起'">
             <span>{{ sidebarCollapsed ? '⏩' : '⏪' }}</span>
           </button>
         </div>
@@ -64,10 +82,18 @@
     </aside>
 
     <!-- 中央核心对话区域 (Main Chat Stream) -->
-    <main class="chat-main" :class="{ 'with-canvas': showCanvas && currentPlan }">
+    <main class="chat-main" :class="{ 'with-canvas': showCanvas && currentPlan }" :inert="(isMobile && mobileSidebarOpen) || (isCompact && showCanvas && !!currentPlan)">
       <!-- 顶部轻量工具栏 -->
       <header class="chat-header">
         <div class="header-left">
+          <button
+            ref="mobileMenuButtonRef"
+            class="mobile-icon-btn mobile-menu-btn"
+            aria-label="打开会话列表"
+            aria-controls="workspace-sessions"
+            :aria-expanded="mobileSidebarOpen"
+            @click="openMobileSidebar"
+          >☰</button>
           <h1 class="chat-title">{{ activeTitle }}</h1>
           <span class="tag-badge" v-if="currentPlan">
             📍 {{ currentPlan.city }} · {{ currentPlan.days.length }}天行程
@@ -80,7 +106,7 @@
             class="canvas-toggle-btn"
             @click="toggleCanvas"
           >
-            <span>{{ showCanvas ? '🗺️ 收起看板' : '🗺️ 展开地图与行程看板' }}</span>
+            <span>{{ isMobile ? '🗺️ 行程' : showCanvas ? '🗺️ 收起看板' : '🗺️ 展开地图与行程看板' }}</span>
           </a-button>
 
           <a-dropdown v-if="currentPlan">
@@ -101,7 +127,7 @@
               </a-menu>
             </template>
             <a-button>
-              <span>📥 导出行程 ▾</span>
+              <span>{{ isMobile ? '📥 导出' : '📥 导出行程 ▾' }}</span>
             </a-button>
           </a-dropdown>
         </div>
@@ -766,7 +792,7 @@
                   <div class="plan-card-footer">
                     <span class="footer-tip">💡 您可以直接在下方输入修改意见（如：“把第2天的故宫换成颐和园”）</span>
                     <a-button type="primary" size="middle" class="canvas-open-btn" @click="openCanvasWithPlan(msg.planData)">
-                      <span>在右侧看板查看完整地图路线 →</span>
+                      <span>查看完整地图与行程 →</span>
                     </a-button>
                   </div>
                 </div>
@@ -829,6 +855,7 @@
             placeholder="普通聊天，或提出旅行需求（例如：我想去北京玩3天，喜欢历史和美食，预算3000左右）..."
             :auto-size="{ minRows: 2, maxRows: 4 }"
             class="native-textarea"
+            aria-label="旅行需求或聊天消息"
             @keydown="handleKeyDown"
           />
 
@@ -838,6 +865,7 @@
                 type="button"
                 class="hitl-toggle-pill"
                 :class="{ active: isHitlEnabled }"
+                :aria-pressed="isHitlEnabled"
                 @click="isHitlEnabled = !isHitlEnabled"
                 :title="isHitlEnabled ? '点击关闭人机协同，恢复全自动流式规划' : '点击开启人机协同(HITL)，将在规划前由您亲自挑选候选景点与酒店'"
               >
@@ -855,6 +883,7 @@
               :disabled="isLoading || !inputMessage.trim()"
               @click="handleSend"
               title="发送指令"
+              aria-label="发送消息"
             >
               <span class="send-icon">🚀</span>
             </button>
@@ -864,7 +893,16 @@
     </main>
 
     <!-- 右侧联动行程与地图看板 (Collapsible Canvas) -->
-    <aside class="workspace-canvas" v-if="showCanvas && currentPlan">
+    <button v-if="isCompact && showCanvas && currentPlan" class="canvas-backdrop" aria-label="关闭行程看板" tabindex="-1" @click="showCanvas = false"></button>
+    <aside
+      class="workspace-canvas"
+      ref="canvasRef"
+      v-if="showCanvas && currentPlan"
+      :role="isCompact ? 'dialog' : undefined"
+      :aria-modal="isCompact ? true : undefined"
+      aria-label="行程与地图看板"
+      @keydown="trapPanelFocus"
+    >
       <div class="canvas-header">
         <div class="canvas-title">
           <span>🗺️ 行程看板</span>
@@ -903,7 +941,7 @@
               <span>📥 导出 ▾</span>
             </a-button>
           </a-dropdown>
-          <button class="close-canvas-btn" @click="showCanvas = false" title="关闭看板">×</button>
+          <button class="close-canvas-btn" @click="showCanvas = false" title="关闭看板" aria-label="关闭看板">×</button>
         </div>
       </div>
 
@@ -1092,6 +1130,57 @@ const router = useRouter()
 
 // 侧边栏与布局状态
 const sidebarCollapsed = ref(false)
+const mobileSidebarOpen = ref(false)
+const isMobile = ref(window.matchMedia('(max-width: 767px)').matches)
+const isCompact = ref(window.matchMedia('(max-width: 1199px)').matches)
+const viewportHeight = ref('100dvh')
+const sidebarRef = ref<HTMLElement | null>(null)
+const canvasRef = ref<HTMLElement | null>(null)
+const mobileMenuButtonRef = ref<HTMLButtonElement | null>(null)
+let canvasReturnFocus: HTMLElement | null = null
+
+const closeMobileSidebar = () => {
+  if (!mobileSidebarOpen.value) return
+  mobileSidebarOpen.value = false
+  nextTick(() => mobileMenuButtonRef.value?.focus())
+}
+
+const openMobileSidebar = () => {
+  mobileSidebarOpen.value = true
+  nextTick(() => sidebarRef.value?.querySelector<HTMLButtonElement>('.sidebar-close-btn')?.focus())
+}
+
+const updateViewport = () => {
+  isMobile.value = window.matchMedia('(max-width: 767px)').matches
+  isCompact.value = window.matchMedia('(max-width: 1199px)').matches
+  viewportHeight.value = `${window.visualViewport?.height ?? window.innerHeight}px`
+  if (!isMobile.value) mobileSidebarOpen.value = false
+}
+
+const handlePanelEscape = (event: KeyboardEvent) => {
+  if (event.key !== 'Escape') return
+  if (mobileSidebarOpen.value) closeMobileSidebar()
+  else if (isCompact.value && showCanvas.value) showCanvas.value = false
+}
+
+// Keep keyboard focus in the active overlay; background panels are inert.
+const trapPanelFocus = (event: KeyboardEvent) => {
+  if (event.key !== 'Tab') return
+  const panel = event.currentTarget as HTMLElement
+  if (panel.getAttribute('aria-modal') !== 'true') return
+  const controls = [...panel.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')]
+    .filter(element => element.offsetParent !== null && !element.closest('[inert]'))
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
+
 const showCanvas = ref(false)
 const isLoading = ref(false)
 const isHitlEnabled = ref(false)
@@ -1213,6 +1302,9 @@ const refreshCanvasEvaluation = async (plan: TripPlan) => {
 // 地图实例与状态
 let mapInstance: any = null
 let mapProvider: 'amap' | 'leaflet' | null = null
+let mapInitVersion = 0
+let mapResizeFrame: number | undefined
+let mapResizeTimer: number | undefined
 const mapStatus = ref('')
 
 // 本地存储键
@@ -1220,6 +1312,7 @@ const STORAGE_SESSIONS = 'trip_chat_sessions_v2'
 const STORAGE_CURRENT_SESSION = 'trip_current_session_id_v2'
 
 onMounted(() => {
+  updateViewport()
   loadSessionsFromStorage()
   if (sessions.value.length === 0) {
     startNewSession()
@@ -1232,11 +1325,17 @@ onMounted(() => {
     }
   }
   window.addEventListener('resize', updateModScrollState)
+  window.addEventListener('resize', updateViewport)
+  window.visualViewport?.addEventListener('resize', updateViewport)
+  document.addEventListener('keydown', handlePanelEscape)
 })
 
 onUnmounted(() => {
   destroyMap()
   window.removeEventListener('resize', updateModScrollState)
+  window.removeEventListener('resize', updateViewport)
+  window.visualViewport?.removeEventListener('resize', updateViewport)
+  document.removeEventListener('keydown', handlePanelEscape)
 })
 
 const loadSessionsFromStorage = () => {
@@ -1263,6 +1362,7 @@ const saveSessionsToStorage = () => {
 }
 
 const startNewSession = () => {
+  closeMobileSidebar()
   const newId = 'session_' + Date.now().toString(36)
   const newSession: ChatSession = {
     id: newId,
@@ -1281,6 +1381,7 @@ const startNewSession = () => {
 }
 
 const switchSession = (sessionId: string) => {
+  closeMobileSidebar()
   currentSessionId.value = sessionId
   const session = sessions.value.find(s => s.id === sessionId)
   if (session) {
@@ -1342,7 +1443,8 @@ const handleModChipClick = (modText: string) => {
 }
 
 const handleKeyDown = (e: KeyboardEvent) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Mobile keyboards use Enter for a new line; never send during Chinese IME composition.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !isMobile.value) {
     e.preventDefault()
     handleSend()
   }
@@ -1702,9 +1804,6 @@ const handleChatStreamingGeneration = async (input: string | TripFormData, exist
 
           // 自动展开右侧看板
           showCanvas.value = true
-          nextTick(() => {
-            initWorkspaceMap()
-          })
         } else if (evt.event === 'error') {
           if (elapsedTimer) {
             clearInterval(elapsedTimer)
@@ -2150,9 +2249,6 @@ const handleConfirmInChatHitl = async (msg: ChatMessage) => {
       sessionStorage.setItem('tripPlan', JSON.stringify(plan))
 
       showCanvas.value = true
-      nextTick(() => {
-        initWorkspaceMap()
-      })
       message.success('人机协同行程定制完成！')
     } else {
       msg.loading = false
@@ -2281,12 +2377,6 @@ const handleChatModification = async (text: string) => {
           saveSessionsToStorage()
         }
 
-        // 联动重绘地图
-        if (showCanvas.value) {
-          nextTick(() => {
-            initWorkspaceMap()
-          })
-        }
         message.success('行程已联动更新！')
       }
     } else {
@@ -2309,19 +2399,11 @@ const openCanvasWithPlan = (plan: TripPlan) => {
   if (!canvasEvaluation.value) {
     void refreshCanvasEvaluation(plan)
   }
-  nextTick(() => {
-    initWorkspaceMap()
-  })
 }
 
 // 看板开关
 const toggleCanvas = () => {
   showCanvas.value = !showCanvas.value
-  if (showCanvas.value && currentPlan.value) {
-    nextTick(() => {
-      initWorkspaceMap()
-    })
-  }
 }
 
 // 导航与页面跳转
@@ -2716,8 +2798,9 @@ const collectPOIs = () => {
 }
 
 const initWorkspaceMap = async () => {
-  if (!currentPlan.value) return
+  if (!showCanvas.value || !currentPlan.value) return
   destroyMap()
+  const version = mapInitVersion
 
   const container = document.getElementById('workspace-amap')
   if (!container) return
@@ -2747,6 +2830,9 @@ const initWorkspaceMap = async () => {
         }),
       ])
 
+      // A closed or replaced canvas must not be initialized by an older loader.
+      if (version !== mapInitVersion || !container.isConnected) return
+
       mapInstance = new AMap.Map(container, {
         center: [centerLng, centerLat],
         zoom: 12,
@@ -2772,6 +2858,7 @@ const initWorkspaceMap = async () => {
       mapStatus.value = pois.length ? '' : '行程暂无经纬度坐标'
       return
     } catch (err) {
+      if (version !== mapInitVersion || !container.isConnected) return
       console.warn('高德加载不可用，无缝切入 Leaflet 备用地图:', err)
       destroyMap()
     } finally {
@@ -2789,6 +2876,8 @@ const initLeafletFallback = (container: HTMLElement, pois: any[], center: [numbe
     const lmap = L.map(container, {
       zoomControl: true,
       scrollWheelZoom: false,
+      // This canvas can be removed immediately when switching back to chat.
+      zoomAnimation: false,
     }).setView(center, 12)
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -2840,9 +2929,9 @@ const initLeafletFallback = (container: HTMLElement, pois: any[], center: [numbe
     })
 
     if (bounds.length > 1) {
-      lmap.fitBounds(bounds, { padding: [30, 30] })
+      lmap.fitBounds(bounds, { padding: [30, 30], animate: false })
     } else if (bounds.length === 1) {
-      lmap.setView(bounds[0], 13)
+      lmap.setView(bounds[0], 13, { animate: false })
     }
 
     mapInstance = lmap
@@ -2850,10 +2939,11 @@ const initLeafletFallback = (container: HTMLElement, pois: any[], center: [numbe
     mapStatus.value = pois.length ? '' : '行程暂无经纬度坐标'
 
     // 关键：解决 Leaflet 在新 DOM 容器中尺寸未校准导致的灰屏问题
-    window.requestAnimationFrame(() => {
+    mapResizeFrame = window.requestAnimationFrame(() => {
+      if (mapInstance !== lmap || !container.isConnected) return
       lmap.invalidateSize()
-      setTimeout(() => {
-        lmap.invalidateSize()
+      mapResizeTimer = window.setTimeout(() => {
+        if (mapInstance === lmap && container.isConnected) lmap.invalidateSize()
       }, 250)
     })
   } catch (e: any) {
@@ -2862,6 +2952,11 @@ const initLeafletFallback = (container: HTMLElement, pois: any[], center: [numbe
 }
 
 const destroyMap = () => {
+  mapInitVersion += 1
+  if (mapResizeFrame !== undefined) window.cancelAnimationFrame(mapResizeFrame)
+  if (mapResizeTimer !== undefined) window.clearTimeout(mapResizeTimer)
+  mapResizeFrame = undefined
+  mapResizeTimer = undefined
   if (mapInstance) {
     if (mapProvider === 'amap' && typeof mapInstance.destroy === 'function') {
       mapInstance.destroy()
@@ -2873,29 +2968,34 @@ const destroyMap = () => {
   }
 }
 
-watch(showCanvas, (val) => {
-  if (val && currentPlan.value) {
-    nextTick(() => {
-      initWorkspaceMap()
-    })
+watch([showCanvas, currentPlan], ([isOpen, plan]) => {
+  if (isOpen && plan) {
+    void initWorkspaceMap()
   } else {
     destroyMap()
   }
-})
+}, { flush: 'post' })
 
-watch(currentPlan, (newPlan) => {
-  if (showCanvas.value && newPlan) {
-    nextTick(() => {
-      initWorkspaceMap()
-    })
+watch(() => isCompact.value && showCanvas.value && !!currentPlan.value, async (isModal) => {
+  if (isModal) {
+    canvasReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    mobileSidebarOpen.value = false
+    await nextTick()
+    canvasRef.value?.querySelector<HTMLButtonElement>('.close-canvas-btn')?.focus()
+  } else {
+    await nextTick()
+    if (canvasReturnFocus?.isConnected) canvasReturnFocus.focus()
+    canvasReturnFocus = null
   }
 })
+
 </script>
 
 <style scoped>
 .workspace-layout {
   display: flex;
   height: 100vh;
+  height: 100dvh;
   width: 100%;
   max-width: 100%;
   background-color: #f7f9fc;
@@ -2907,6 +3007,7 @@ watch(currentPlan, (newPlan) => {
 /* 左侧侧边栏 */
 .workspace-sidebar {
   width: 260px;
+  flex-shrink: 0;
   background-color: #ffffff;
   border-right: 1px solid #eef2f6;
   display: flex;
@@ -3128,13 +3229,14 @@ watch(currentPlan, (newPlan) => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   position: relative;
   overflow: hidden;
   background: #fbfcfe;
 }
 
 .chat-header {
+  flex-shrink: 0;
   height: 60px;
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(12px);
@@ -5403,7 +5505,7 @@ watch(currentPlan, (newPlan) => {
   flex-shrink: 0;
   background: #ffffff;
   border-left: 1px solid #eef2f6;
-  height: 100vh;
+  height: 100%;
   display: flex;
   flex-direction: column;
   z-index: 10;
@@ -5411,6 +5513,7 @@ watch(currentPlan, (newPlan) => {
 }
 
 .canvas-header {
+  flex-shrink: 0;
   height: 60px;
   padding: 0 18px;
   display: flex;
@@ -6242,5 +6345,139 @@ watch(currentPlan, (newPlan) => {
   font-size: 10.5px;
   color: #64748b;
   line-height: 1.4;
+}
+
+.mobile-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  color: #334155;
+  font-size: 22px;
+  cursor: pointer;
+}
+.mobile-menu-btn { display: none; }
+.sidebar-close-btn { margin-left: auto; }
+.sidebar-backdrop, .canvas-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(15, 23, 42, 0.4);
+  cursor: pointer;
+}
+.sidebar-backdrop { z-index: 40; }
+.canvas-backdrop { z-index: 20; }
+
+/* On tablets, open the map above the chat instead of squeezing three columns. */
+@media (max-width: 1199px) {
+  .workspace-canvas { position: absolute; inset: 0 0 0 auto; max-width: 100%; z-index: 30; }
+  .messages-container { min-height: 0; padding-bottom: 24px; overscroll-behavior-y: contain; }
+  .chat-input-wrapper { position: relative; bottom: auto; flex-shrink: 0; padding: 12px 20px 20px; }
+  .message-content-wrap { flex: 1; min-width: 0; max-width: calc(100% - 50px); }
+  .message-row.user .message-content-wrap { flex: 0 1 auto; }
+  .assistant-content { min-width: 0; }
+  .assistant-bubble, .user-bubble { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .panel-header, .hitl-card-header, .param-card-header, .plan-card-header, .plan-card-footer,
+  .hitl-footer, .day-item-topbar, .day-hotel-card, .plan-quality-strip, .quality-strip-left {
+    flex-direction: column; align-items: stretch; gap: 10px;
+  }
+  .panel-header-right, .plan-card-header-right, .day-item-title-box,
+  .hotel-card-left, .pill-head, .pill-dims, .changes-banner { flex-wrap: wrap; }
+  .agent-nodes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .param-form-grid, .hitl-attractions-grid, .hitl-hotels-grid { grid-template-columns: minmax(0, 1fr); }
+  .param-grid-item.full-width { grid-column: auto; }
+  .param-grid-item, .hitl-header-main, .param-header-left, .hitl-title-box, .param-title-box,
+  .plan-header-titles, .day-item-title-box, .spots-route-list, .hotel-card-left { min-width: 0; }
+  .param-date-row, .date-inputs-wrap { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
+  .date-sep, .date-separator { display: none; }
+  .param-input, .hitl-date-input { width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; font-size: 16px; }
+  .date-bar-left { min-width: 0; width: 100%; }
+  .param-confirm-btn, .hitl-btn-confirm, .hitl-btn-skip { min-height: 44px; width: 100%; white-space: normal; }
+  .param-card-actions, .hitl-footer-btns { flex-direction: column; align-items: stretch; }
+  .hitl-poi-card, .hitl-hotel-card { min-width: 0; }
+  .plan-main-title, .day-desc-text, .hotel-title-text { white-space: normal; overflow-wrap: anywhere; }
+  .day-spots-route-wrap, .day-meals-strip { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .spot-route-chip { max-width: 100%; flex-wrap: wrap; }
+  .spot-chip-name { overflow-wrap: anywhere; min-width: 0; }
+  .canvas-open-btn { width: 100%; height: auto; min-height: 44px; white-space: normal; }
+}
+
+@media (max-width: 767px) {
+  .workspace-layout { height: var(--workspace-height, 100dvh); }
+  .workspace-sidebar, .workspace-sidebar.sidebar-collapsed {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: min(300px, calc(100% - 48px));
+    height: 100%;
+    z-index: 50;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0.2s;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-sizing: border-box;
+  }
+  .workspace-sidebar.mobile-open { transform: translateX(0); visibility: visible; }
+  .sidebar-top { padding: 14px; }
+  .brand-header { gap: 8px; }
+  .brand-icon { flex-shrink: 0; }
+  .brand-title { font-size: 16px; }
+  .brand-subtitle { font-size: 10px; }
+  .session-list-section { min-height: 0; overflow-y: auto; }
+  .session-item, .new-chat-btn, .switch-mode-btn { min-height: 44px; }
+  .delete-session-btn { opacity: 1; min-width: 44px; min-height: 44px; }
+  .sidebar-bottom { margin-top: auto; }
+  .chat-header { height: auto; min-height: 64px; padding: env(safe-area-inset-top, 0px) 10px 0; gap: 6px; }
+  .header-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .mobile-menu-btn { display: inline-flex; }
+  .chat-title { min-width: 0; margin: 0; font-size: 15px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+  .header-left .tag-badge { display: none; }
+  .header-right { gap: 6px; flex-shrink: 0; }
+  .header-right :deep(.ant-btn) { height: 44px; padding: 4px 8px; font-size: 12px; }
+  .messages-container { padding: 16px 12px 24px; }
+  .welcome-screen { margin: 24px auto 0; }
+  .welcome-icon-wrap { width: 52px; height: 52px; font-size: 28px; }
+  .welcome-label { font-size: 9px; letter-spacing: 1.3px; }
+  .welcome-heading { font-size: 24px; line-height: 1.4; }
+  .welcome-subheading { font-size: 14px; margin-bottom: 24px; }
+  .inspiration-chips { flex-direction: column; gap: 10px; }
+  .inspiration-chip { width: 100%; min-height: 48px; padding: 10px 14px; text-align: left; justify-content: space-between; border-radius: 16px; }
+  .chip-text { min-width: 0; line-height: 1.6; }
+  .chip-arrow { flex-shrink: 0; }
+  .conversation-stream { gap: 20px; }
+  .message-row { gap: 8px; }
+  .avatar-wrap { width: 28px; height: 28px; font-size: 16px; }
+  .message-content-wrap { flex: 1; min-width: 0; max-width: calc(100% - 36px); }
+  .assistant-bubble, .user-bubble { padding: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .agent-collaboration-panel, .pre-trip-param-card, .in-chat-hitl-card { padding: 14px 12px; }
+  .hitl-date-bar { padding: 10px; }
+  .pref-choice-pill { min-height: 36px; display: inline-flex; align-items: center; }
+  .plan-card-header, .plan-card-footer { padding: 14px 12px; }
+  .days-preview-grid { padding: 12px; }
+  .chat-input-wrapper { padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px)); background: #fbfcfe; }
+  .floating-input-card { padding: 12px; border-radius: 16px; box-sizing: border-box; }
+  .native-textarea, .hitl-feedback-input { font-size: 16px; }
+  .shortcut-hint { display: none; }
+  .bar-left-controls { min-width: 0; gap: 0; }
+  .hitl-toggle-pill { min-height: 40px; white-space: nowrap; font-size: 11px; padding: 6px 8px; }
+  .send-btn { width: 44px; height: 44px; flex-shrink: 0; }
+  .modification-chips-container { gap: 6px; margin-bottom: 8px; }
+  .mod-header-badge { display: none; }
+  .mod-chip { min-height: 40px; }
+  .workspace-canvas { width: 100%; border-left: 0; }
+  .canvas-header { height: auto; min-height: 64px; padding: env(safe-area-inset-top, 0px) 12px 0; gap: 8px; }
+  .canvas-title { min-width: 0; flex-wrap: wrap; gap: 4px 8px; font-size: 14px; }
+  .canvas-header-score-pill { display: none; }
+  .canvas-header-actions { gap: 4px; flex-shrink: 0; }
+  .canvas-export-btn, .close-canvas-btn { min-height: 44px; }
+  .close-canvas-btn { min-width: 44px; }
+  .canvas-body { min-height: 0; padding: 12px 12px calc(16px + env(safe-area-inset-bottom, 0px)); overscroll-behavior-y: contain; }
+  .canvas-map-wrap { flex-shrink: 0; }
 }
 </style>
