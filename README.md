@@ -25,12 +25,14 @@ pip install -r requirements.txt
 $env:UV_CACHE_DIR = (Join-Path (Get-Location) '.uv-cache')
 $env:UV_TOOL_DIR = (Join-Path (Get-Location) '.uv-tools')
 $env:UV_TOOL_BIN_DIR = (Join-Path (Get-Location) '.uv-bin')
-uv tool install --python (Get-Command python).Source 'amap-mcp-server==0.1.11'
-uv tool install --python (Get-Command python).Source 'ddgs[mcp]==9.16.0'
+uv tool install --python (Get-Command python).Source --with 'pydantic>=2.11,<2.14' 'amap-mcp-server==0.1.11'
+uv tool install --python (Get-Command python).Source --with 'pydantic>=2.11,<2.14' 'ddgs[mcp]==9.16.0'
 Copy-Item .env.example .env
 # 填写 .env 中的密钥
 python run.py
 ```
+
+MCP 工具使用独立于 `backend/.venv` 的环境，后端的依赖约束不会自动应用到工具环境。安装时通过 `--with` 限制 Pydantic 版本，避免旧版 MCP 导入已在 Pydantic 2.14 移除的 `eval_type_backport` 而失败。已有安装需要修复时，使用相同命令加上 `--force` 重新安装对应工具，并保留上述 `UV_*` 目录配置。
 
 ```powershell
 cd frontend

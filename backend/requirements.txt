@@ -12,7 +12,8 @@ mcp>=1.16,<1.17
 # FastAPI和相关依赖
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-pydantic>=2.0.0
+# MCP 1.16 imports eval_type_backport, which Pydantic 2.14 removed.
+pydantic>=2.11,<2.14
 pydantic-settings>=2.0.0
 
 # HTTP客户端

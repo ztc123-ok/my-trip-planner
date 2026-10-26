@@ -1,5 +1,11 @@
 # Local implementation notes requested to stay out of Git
 /IMPLEMENTATION_GUIDE.md
+/PROJECT_DEVELOPER_GUIDE.md
+/TECHNICAL_OVERVIEW.md
+/简历/
+/简历
+简历/
+简历
 
 # Secrets and local environments
 .env
@@ -23,3 +29,4 @@ dist/
 .DS_Store
 Thumbs.db
 /backend/a.log
+
