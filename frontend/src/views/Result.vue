@@ -5,7 +5,7 @@
       <a-button class="back-button" size="large" @click="goBack">
         ← 返回首页
       </a-button>
-      <a-space size="middle">
+      <div class="report-actions">
         <a-button type="primary" @click="chatDrawerVisible = true">
           💬 AI 对话调整行程
         </a-button>
@@ -38,10 +38,20 @@
           </a-button>
         </a-dropdown>
 
-      </a-space>
+      </div>
     </div>
 
     <div v-if="tripPlan" class="content-wrapper">
+      <nav class="report-section-nav" aria-label="报表章节导航">
+        <button
+          v-for="section in reportSections"
+          :key="section.key"
+          type="button"
+          :aria-current="activeSection === section.key ? 'location' : undefined"
+          :class="{ active: activeSection === section.key }"
+          @click="scrollToSection(section)"
+        >{{ section.label }}</button>
+      </nav>
       <!-- 侧边导航 -->
       <div class="side-nav">
         <a-affix :offset-top="80">
@@ -146,7 +156,7 @@
         <!-- 行程质量与多维评估报告 (Phase 6) -->
         <a-card id="evaluation" title="🎯 智能体全方位质量质检报告" :bordered="false" class="eval-card">
           <template #extra>
-            <a-space>
+            <a-space wrap>
               <a-tag :color="observabilityStatus?.tracing_enabled ? 'cyan' : 'default'">
                 {{ observabilityStatus?.tracing_enabled ? '🔍 LangSmith Tracing 已激活' : '🔍 多维工程质检' }}
               </a-tag>
@@ -250,7 +260,7 @@
               <a-divider orientation="left">🎯 景点安排</a-divider>
               <a-list
                 :data-source="day.attractions"
-                :grid="{ gutter: 16, column: 2 }"
+                :grid="{ gutter: 16, xs: 1, sm: 1, md: 2, lg: 2, xl: 2, xxl: 2 }"
               >
                 <template #renderItem="{ item, index }">
                   <a-list-item>
@@ -262,6 +272,7 @@
                             size="small"
                             @click="moveAttraction(day.day_index, index, 'up')"
                             :disabled="index === 0"
+                            aria-label="上移景点"
                           >
                             ↑
                           </a-button>
@@ -269,12 +280,14 @@
                             size="small"
                             @click="moveAttraction(day.day_index, index, 'down')"
                             :disabled="index === day.attractions.length - 1"
+                            aria-label="下移景点"
                           >
                             ↓
                           </a-button>
                           <a-button
                             size="small"
                             danger
+                            aria-label="删除景点"
                             @click="deleteAttraction(day.day_index, index)"
                           >
                             🗑️
@@ -338,18 +351,18 @@
                 <template #title>
                   <span class="hotel-title">{{ day.hotel.name }}</span>
                 </template>
-                <a-descriptions :column="2" size="small">
+                <a-descriptions :column="{ xs: 1, sm: 1, md: 2 }" size="small">
                   <a-descriptions-item label="地址">{{ day.hotel.address }}</a-descriptions-item>
                   <a-descriptions-item label="类型">{{ day.hotel.type }}</a-descriptions-item>
                   <a-descriptions-item label="价格范围">{{ day.hotel.price_range }}</a-descriptions-item>
                   <a-descriptions-item label="评分">{{ day.hotel.rating }}⭐</a-descriptions-item>
-                  <a-descriptions-item label="距离" :span="2">{{ day.hotel.distance }}</a-descriptions-item>
+                  <a-descriptions-item label="距离" :span="isMobile ? 1 : 2">{{ day.hotel.distance }}</a-descriptions-item>
                 </a-descriptions>
               </a-card>
 
               <!-- 餐饮安排 -->
               <a-divider orientation="left">🍽️ 餐饮安排</a-divider>
-              <a-descriptions :column="1" bordered size="small">
+              <a-descriptions :column="1" bordered size="small" class="meal-descriptions">
                 <a-descriptions-item
                   v-for="meal in day.meals"
                   :key="meal.type"
@@ -374,7 +387,7 @@
         <a-list
           v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0"
           :data-source="tripPlan.weather_info"
-          :grid="{ gutter: 16, column: 3 }"
+          :grid="{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 3, xxl: 3 }"
         >
           <template #renderItem="{ item }">
             <a-list-item>
@@ -418,18 +431,20 @@
     </a-empty>
 
     <!-- 悬浮 AI 对话调整入口 -->
-    <div class="floating-chat-trigger" @click="chatDrawerVisible = true" title="点击展开 AI 行程小助手">
+    <button v-if="tripPlan" type="button" class="floating-chat-trigger" @click="chatDrawerVisible = true" aria-label="打开 AI 行程小助手" title="点击展开 AI 行程小助手">
       <span class="trigger-icon">💬</span>
       <span class="trigger-text">AI 对话调整</span>
-    </div>
+    </button>
 
     <!-- AI 对话调整抽屉 -->
     <a-drawer
       v-model:open="chatDrawerVisible"
-      title="🤖 AI 对话调整行程 (LangGraph 子图)"
+      :title="isMobile ? '🤖 AI 对话调整行程' : '🤖 AI 对话调整行程 (LangGraph 子图)'"
       placement="right"
-      width="440px"
-      :body-style="{ display: 'flex', flexDirection: 'column', height: 'calc(100% - 55px)', padding: '16px' }"
+      width="min(440px, 100vw)"
+      root-class-name="result-chat-drawer"
+      :root-style="{ '--report-viewport-height': viewportHeight }"
+      :body-style="{ display: 'flex', flexDirection: 'column', minHeight: 0, padding: '16px' }"
     >
       <!-- 快捷调整标签 -->
       <div class="drawer-chips-wrap">
@@ -477,10 +492,11 @@
           v-model:value="chatInput"
           placeholder="输入您的修改想法，如：把第2天的故宫换成颐和园..."
           :auto-size="{ minRows: 2, maxRows: 4 }"
-          @keydown.enter.exact.prevent="sendDrawerChat"
+          aria-label="行程修改意见"
+          @keydown="handleDrawerKeyDown"
         />
         <div class="drawer-input-footer">
-          <span class="d-hint">Enter 发送 / Shift+Enter 换行</span>
+          <span class="d-hint">{{ isMobile ? '点击按钮发送' : 'Enter 发送 / Shift+Enter 换行' }}</span>
           <a-button type="primary" :loading="chatLoading" @click="sendDrawerChat">
             发送指令
           </a-button>
@@ -489,7 +505,7 @@
     </a-drawer>
 
     <!-- 回到顶部按钮 -->
-    <a-back-top :visibility-height="300">
+    <a-back-top :visibility-height="300" class="report-back-top" aria-label="回到顶部">
       <div class="back-top-button">
         ↑
       </div>
@@ -519,6 +535,20 @@ const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
+const isMobile = ref(window.matchMedia('(max-width: 767px)').matches)
+const viewportHeight = ref('100dvh')
+const updateViewport = () => {
+  isMobile.value = window.matchMedia('(max-width: 767px)').matches
+  viewportHeight.value = `${window.visualViewport?.height ?? window.innerHeight}px`
+}
+const reportSections = computed(() => [
+  { key: 'overview', label: '📋 概览' },
+  ...(tripPlan.value?.budget ? [{ key: 'budget', label: '💰 预算' }] : []),
+  { key: 'evaluation', label: '🎯 质检' },
+  { key: 'map', label: '📍 地图' },
+  ...(tripPlan.value?.days ?? []).map((day, index) => ({ key: `day-${index}`, label: `📅 第${day.day_index + 1}天` })),
+  { key: 'weather', label: '🌤️ 天气' },
+])
 
 // AI 对话调整抽屉状态
 const chatDrawerVisible = ref(false)
@@ -570,6 +600,13 @@ const fetchObservabilityStatus = async () => {
     observabilityStatus.value = await getObservabilityStatus()
   } catch (err) {
     console.error('获取可观测性状态失败:', err)
+  }
+}
+
+const handleDrawerKeyDown = (event: KeyboardEvent) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && !isMobile.value) {
+    event.preventDefault()
+    void sendDrawerChat()
   }
 }
 
@@ -657,6 +694,9 @@ let mapGeneration = 0
 const mapStatus = ref('地图加载中…')
 
 onMounted(async () => {
+  updateViewport()
+  window.addEventListener('resize', updateViewport)
+  window.visualViewport?.addEventListener('resize', updateViewport)
   const data = sessionStorage.getItem('tripPlan')
   if (data) {
     tripPlan.value = JSON.parse(data)
@@ -670,6 +710,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', updateViewport)
+  window.visualViewport?.removeEventListener('resize', updateViewport)
   mapGeneration += 1
   destroyMap()
 })
@@ -679,8 +721,12 @@ const goBack = () => {
 }
 
 // 滚动到指定区域
-const scrollToSection = ({ key }: { key: string }) => {
+const scrollToSection = async ({ key }: { key: string }) => {
   activeSection.value = key
+  if (key.startsWith('day-')) {
+    activeDays.value = [Number(key.slice(4))]
+    await nextTick()
+  }
   const element = document.getElementById(key)
   if (element) {
     element.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -1353,6 +1399,17 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   animation: fadeInDown 0.6s ease-out;
 }
 
+.report-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.report-section-nav { display: none; }
+
+.main-content [id] { scroll-margin-top: 80px; }
+
 .back-button {
   border-radius: 8px;
   font-weight: 500;
@@ -1657,6 +1714,7 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 
 .map-surface {
   position: relative;
+  isolation: isolate;
   width: 100%;
   height: 440px;
 }
@@ -1851,28 +1909,10 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   }
 }
 
-/* 响应式设计 */
-@media (max-width: 768px) {
-  .result-container {
-    padding: 20px 10px;
-  }
-
-  .page-header {
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .top-info-section {
-    flex-direction: column;
-  }
-
-  .left-info {
-    flex: auto;
-  }
-}
-
 /* AI 对话调整浮标与抽屉样式 */
 .floating-chat-trigger {
+  border: 0;
+  font-family: inherit;
   position: fixed;
   bottom: 40px;
   right: 40px;
@@ -2354,6 +2394,133 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   border-radius: 6px;
   display: inline-block;
   font-weight: 600;
+}
+
+@media (max-width: 1199px) {
+  .top-info-section { flex-direction: column; }
+  .left-info { flex: auto; min-width: 0; }
+  .right-map { width: 100%; }
+}
+
+@media (max-width: 1023px) {
+  .content-wrapper { flex-direction: column; gap: 16px; }
+  .side-nav { display: none; }
+  .report-section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    padding: 8px;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    background: rgba(255, 255, 255, 0.97);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+  }
+  .report-section-nav button {
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 8px;
+    background: #f1f5f9;
+    color: #334155;
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .report-section-nav button.active { background: #667eea; color: white; }
+  .main-content { width: 100%; }
+}
+
+@media (max-width: 767px) {
+  .result-container { min-height: auto; padding: 16px 12px calc(80px + env(safe-area-inset-bottom, 0px)); }
+  .page-header { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .report-actions { display: contents; }
+  .page-header :deep(.ant-btn) { width: 100%; min-width: 0; height: auto; min-height: 44px; padding: 8px; font-size: 13px; white-space: normal; }
+  .content-wrapper { gap: 12px; }
+  .top-info-section { gap: 0; margin-bottom: 0; }
+  .left-info { gap: 0; }
+  .main-content { min-width: 0; }
+  .main-content :deep(.ant-card) { min-width: 0; margin-bottom: 16px; }
+  .main-content :deep(.ant-card-head) { min-height: 52px; padding: 12px 14px; }
+  .main-content :deep(.ant-card-head-wrapper) { flex-wrap: wrap; gap: 8px; }
+  .main-content :deep(.ant-card-head-title) { padding: 0; font-size: 16px; white-space: normal; overflow-wrap: anywhere; }
+  .main-content :deep(.ant-card-extra) { max-width: 100%; padding: 0; }
+  .main-content :deep(.ant-card-body) { padding: 16px 14px; }
+  .main-content :deep(.ant-tag) { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .main-content :deep(.ant-space) { flex-wrap: wrap; }
+  .overview-score-chip { white-space: nowrap; gap: 4px; padding: 4px 8px; }
+  .info-value, .knowledge-tag-item, .rag-text, .main-content :deep(p) { overflow-wrap: anywhere; }
+  .info-value { white-space: pre-line; }
+  .budget-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .budget-item { min-width: 0; padding: 12px 6px; }
+  .budget-value { font-size: 20px; overflow-wrap: anywhere; }
+  .budget-total { flex-wrap: wrap; gap: 8px; padding: 14px; }
+  .total-label { font-size: 14px; }
+  .total-value { font-size: 26px; overflow-wrap: anywhere; }
+  .map-card { min-height: 0; height: auto; }
+  .map-card :deep(.ant-card-body) { height: auto; padding: 0; }
+  .map-surface { height: 300px; }
+  .eval-card :deep(.ant-card-head-wrapper) { flex-direction: column; align-items: stretch; }
+  .eval-card :deep(.ant-btn) { min-height: 44px; white-space: normal; }
+  .eval-score-banner { flex-direction: column; align-items: stretch; padding: 16px 12px; gap: 16px; }
+  .score-circle-box { align-self: center; }
+  .score-meta-box { min-width: 0; }
+  .grade-title { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .grade-tag, .grade-sub { max-width: 100%; overflow-wrap: anywhere; }
+  .metrics-row { gap: 8px; }
+  .m-pill { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+  .eval-dimensions-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .eval-suggestions-box { padding: 12px; overflow-wrap: anywhere; }
+  .days-card { margin-top: 0; }
+  .main-content :deep(.ant-collapse-header) { padding: 14px 10px !important; }
+  .main-content :deep(.ant-collapse-content-box) { padding: 12px 10px; }
+  .day-header { flex-wrap: wrap; gap: 4px 12px; }
+  .day-title { font-size: 16px; }
+  .day-info { padding: 12px; }
+  .info-row { flex-direction: column; gap: 4px; }
+  .info-row .label { min-width: 0; }
+  .info-row .value { min-width: 0; overflow-wrap: anywhere; }
+  .main-content :deep(.ant-list-item:hover) { transform: none; }
+  .attraction-image { height: 180px; }
+  .attraction-card :deep(.ant-btn) { min-width: 44px; min-height: 44px; }
+  .main-content :deep(input), .main-content :deep(textarea) { font-size: 16px; }
+  .hotel-title { white-space: normal; overflow-wrap: anywhere; }
+  .main-content :deep(.ant-descriptions-item-label) { white-space: nowrap; }
+  .main-content :deep(.ant-descriptions-item-content) { min-width: 0; overflow-wrap: anywhere; }
+  .meal-descriptions :deep(table) { table-layout: fixed; }
+  .meal-descriptions :deep(.ant-descriptions-item-label) { width: 60px; padding: 10px; }
+  .meal-descriptions :deep(.ant-descriptions-item-content) { padding: 10px; }
+  .floating-chat-trigger { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); min-height: 44px; padding: 10px 16px; }
+  .report-back-top { right: 16px; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
+  .back-top-button { width: 44px; height: 44px; }
+  .drawer-chips-wrap { flex-shrink: 0; padding: 8px; }
+  .chips-row { flex-wrap: nowrap; overflow-x: auto; }
+  .drawer-chip-btn { flex-shrink: 0; min-height: 40px; white-space: nowrap; padding: 8px 10px; font-size: 12px; }
+  .drawer-messages { min-height: 0; overscroll-behavior-y: contain; }
+  .d-msg-row { gap: 8px; }
+  .d-avatar { width: 28px; height: 28px; }
+  .d-bubble { flex: 1; min-width: 0; max-width: calc(100% - 36px); box-sizing: border-box; padding: 10px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .drawer-input-box { flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .drawer-input-box :deep(textarea) { font-size: 16px; }
+  .drawer-input-footer :deep(.ant-btn) { min-height: 44px; }
+}
+</style>
+
+<style>
+@media (max-width: 767px) {
+  .result-chat-drawer.ant-drawer { height: var(--report-viewport-height, 100dvh); bottom: auto; }
+  .result-chat-drawer .ant-drawer-header { padding: calc(14px + env(safe-area-inset-top, 0px)) 14px 14px; }
+  .result-chat-drawer .ant-drawer-title { min-width: 0; font-size: 16px; overflow-wrap: anywhere; }
+  .result-chat-drawer .ant-drawer-close { min-width: 44px; min-height: 44px; margin-inline-end: 8px; }
+  .result-chat-drawer .ant-drawer-body { overflow: hidden; }
 }
 </style>
 
